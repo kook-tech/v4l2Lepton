@@ -260,6 +260,7 @@ void LeptonThread::run()
 					row = i / PACKET_SIZE_UINT16;
 				}
 				myImage.setPixel(column, row, color);
+				printRawThermalData(column,row,valueFrameBuffer);
 			}
 		}
 
@@ -280,6 +281,14 @@ void LeptonThread::run()
 void LeptonThread::performFFC() {
 	//perform FFC
 	lepton_perform_ffc();
+}
+
+void LeptonThread::printRawThermalData(int col, int row, uint16_t val){
+	for(int r = 0; r < row; r++){
+		for(int c = 0; c < col ; c++){
+			fprintf(val[row][col], ",");
+		}
+	}
 }
 
 void LeptonThread::log_message(uint16_t level, std::string msg)

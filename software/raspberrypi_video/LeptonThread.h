@@ -32,6 +32,7 @@ public:
   void run();
   void updateVpipe();
   void open_vpipe();
+  void printRawThermalData(int, int, uint16_t);
 public slots:
   void performFFC();
 
