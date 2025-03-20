@@ -31,8 +31,8 @@
 static char const *v4l2dev = "/dev/video1";
 static char *spidev = NULL;
 static int v4l2sink = -1;
-static int width = 80;                //640;    // Default for Flash
-static int height = 60;        //480;    // Default for Flash
+static int width = 160;                //640;    // Default for Flash
+static int height = 120;        //480;    // Default for Flash
 static char *vidsendbuf = NULL;
 static int vidsendsiz = 0;
 

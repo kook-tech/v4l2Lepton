@@ -30,8 +30,7 @@ public:
   void useRangeMinValue(uint16_t);
   void useRangeMaxValue(uint16_t);
   void run();
-  void updateVpipe();
-  void open_vpipe();
+
 public slots:
   void performFFC();
 
@@ -55,12 +54,10 @@ private:
   int myImageWidth;
   int myImageHeight;
   QImage myImage;
-  uchar*  vidsendbuf;
 
   uint8_t result[PACKET_SIZE*PACKETS_PER_FRAME];
   uint8_t shelf[4][PACKET_SIZE*PACKETS_PER_FRAME];
   uint16_t *frameBuffer;
-  int v4l2sink;
 
 };
 
