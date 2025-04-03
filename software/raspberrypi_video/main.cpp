@@ -67,7 +67,7 @@ int main(int argc, char **argv) {
             if (0 <= val && val <= 65535) {
                 rangeMin = val;
                 i++;
-		printf("min :  %f(C) -> %d(CK) \n", valf, val);
+		printf("min :  %.f ( C ) -> %d ( CK ) \n", valf, val);
             }
         } else if (strcmp(argv[i], "-max") == 0 && (i + 1 != argc)) {
             float valf = std::atoi(argv[i + 1]);
@@ -75,7 +75,7 @@ int main(int argc, char **argv) {
             if (0 <= val && val <= 65535) {
                 rangeMax = val;
                 i++;
-		printf("max :  %f(C) -> %d(CK) \n", valf, val);
+		printf("max :  %.f ( C ) -> %d ( CK ) \n", valf, val);
             }
         }else if (strcmp(argv[i], "-sigmin") == 0 && (i + 1 != argc)) {
             float valf = std::atoi(argv[i + 1]);
@@ -83,7 +83,7 @@ int main(int argc, char **argv) {
             if (0 <= val && val <= 65535) {
                 sigMin = val;
                 i++;
-		printf("sigMin :  %f(C) -> %d(CK) \n", valf, val);
+		printf("sigMin :  %.f ( C ) -> %d ( CK ) \n", valf, val);
             }
         }else if (strcmp(argv[i], "-sigmax") == 0 && (i + 1 != argc)) {
             float valf = std::atoi(argv[i + 1]);
@@ -91,7 +91,7 @@ int main(int argc, char **argv) {
             if (0 <= val && val <= 65535) {
                 sigMax = val;
                 i++;
-		printf("sigMax :  %f(C) -> %d(CK) \n", valf, val);
+		printf("sigMax :  %.f ( C ) -> %d ( CK ) \n", valf, val);
             }
         }
 

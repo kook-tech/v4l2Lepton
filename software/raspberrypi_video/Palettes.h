@@ -10,4 +10,5 @@ extern int get_size_colormap_ironblack();
 //
 extern void customizePalette(int sigMin, int sigMax, int rangeMin, int rangeMax);
 extern void customizePalette();
+extern void exportColormapToCSV(int* colormap, int size);
 #endif
