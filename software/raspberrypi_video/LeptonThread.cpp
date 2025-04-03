@@ -244,8 +244,8 @@ void LeptonThread::run()
 					}
 					break;
 				}
-
-				//
+				//##############################
+				//온도 데이터인 valueFrameBuffer를 가지고 컬러팔레트에 매핑을 하는 부분입니다.
 				value = (valueFrameBuffer - minValue) * scale;
 				int ofs_r = 3 * value + 0; if (colormapSize <= ofs_r) ofs_r = colormapSize - 1;
 				int ofs_g = 3 * value + 1; if (colormapSize <= ofs_g) ofs_g = colormapSize - 1;
@@ -260,6 +260,7 @@ void LeptonThread::run()
 					row = i / PACKET_SIZE_UINT16;
 				}
 				myImage.setPixel(column, row, color);
+				//###############################
 				printRawThermalData(column,row,valueFrameBuffer);
 			}
 		}
@@ -284,11 +285,9 @@ void LeptonThread::performFFC() {
 }
 
 void LeptonThread::printRawThermalData(int col, int row, uint16_t val){
-	for(int r = 0; r < row; r++){
-		for(int c = 0; c < col ; c++){
-			fprintf(val[row][col], ",");
-		}
-	}
+	float celcius = (float)((val - 27315) / 100.0);
+	printf("(%d, %d) = %.f \n",row,col, celcius);
+	// printf("(%d, %d) = %u \n",row,col, val);
 }
 
 void LeptonThread::log_message(uint16_t level, std::string msg)
