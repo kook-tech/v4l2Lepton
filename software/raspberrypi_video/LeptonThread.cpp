@@ -261,7 +261,7 @@ void LeptonThread::run()
 				}
 				myImage.setPixel(column, row, color);
 				//###############################
-				printRawThermalData(column,row,valueFrameBuffer);
+				// printRawThermalData(column,row,valueFrameBuffer);
 			}
 		}
 
