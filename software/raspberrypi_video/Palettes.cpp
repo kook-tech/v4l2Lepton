@@ -3028,46 +3028,49 @@ int get_size_colormap_ironblack() {
 }
 void customizePalette(int sigMin, int sigMax) {
     const int* base = colormap_ironblack;
-    const int numColors = get_size_colormap_ironblack() / 3;
+    const int numColors = get_size_colormap_ironblack() / 3;  // 보통 1000
+    int custom_colormap[3000]; // 1000 * 3 (R,G,B)
 
-    int custom_colormap[numColors * 3];
-
-    const int rangeMin = 27315;
-    const int rangeMax = 41315;
+    int p20 = numColors * 0.2;
+    int p60 = numColors * 0.6;
+    int p80 = numColors * 0.8;
 
     for (int i = 0; i < numColors; ++i) {
-        float ratio = static_cast<float>(i) / numColors;
-        int thermalValue;
+        int mappedTemp;
 
-        if (ratio < 0.2f) {
-            // 앞 20% → rangeMin ~ sigMin
-            float subRatio = ratio / 0.2f;
-            thermalValue = rangeMin + subRatio * (sigMin - rangeMin);
-        } else if (ratio < 0.8f) {
-            // 중간 60% → sigMin ~ sigMax
-            float subRatio = (ratio - 0.2f) / 0.6f;
-            thermalValue = sigMin + subRatio * (sigMax - sigMin);
+        if (i < p20) {
+            // sigMin보다 낮은 부분 → 앞 20% 매핑
+            float ratio = (float)i / p20;
+            mappedTemp = 27315 + ratio * (sigMin - 27315);
+        } else if (i < p80) {
+            // sigMin ~ sigMax → 중간 60%
+            float ratio = (float)(i - p20) / p60;
+            mappedTemp = sigMin + ratio * (sigMax - sigMin);
         } else {
-            // 뒤 20% → sigMax ~ rangeMax
-            float subRatio = (ratio - 0.8f) / 0.2f;
-            thermalValue = sigMax + subRatio * (rangeMax - sigMax);
+            // sigMax보다 높은 부분 → 뒤 20%
+            float ratio = (float)(i - p80) / (numColors - p80);
+            mappedTemp = sigMax + ratio * (42315 - sigMax);
         }
 
-        // thermalValue는 사실 색상 자체에 영향을 주지 않고,
-        // 색상 인덱스를 그대로 복사하는 구조라면 의미는 연산 흐름용임.
-        // 다만 향후 색상 재매핑시에도 thermalValue 기준으로 정렬될 수 있음.
+        // 온도 → 원본 컬러맵에서 인덱스로 변환
+        float mappedRatio = (float)(mappedTemp - 27315) / (42315 - 27315);
+        if (mappedRatio < 0.0f) mappedRatio = 0.0f;
+        if (mappedRatio > 1.0f) mappedRatio = 1.0f;
+        int colorIdx = mappedRatio * (numColors - 1);
 
-        // 원본 컬러맵에서 같은 인덱스 위치의 색상 가져오기
-        int idx = i * 3;
-        custom_colormap[idx + 0] = base[idx + 0];
-        custom_colormap[idx + 1] = base[idx + 1];
-        custom_colormap[idx + 2] = base[idx + 2];
+        // 복사: base → custom_colormap
+        custom_colormap[i * 3 + 0] = base[colorIdx * 3 + 0]; // R
+        custom_colormap[i * 3 + 1] = base[colorIdx * 3 + 1]; // G
+        custom_colormap[i * 3 + 2] = base[colorIdx * 3 + 2]; // B
     }
 
-    // 원본 팔레트 덮어쓰기
+    // 💥 최종적으로 colormap_ironblack에 덮어쓰기
     for (int i = 0; i < numColors * 3; ++i) {
         colormap_ironblack[i] = custom_colormap[i];
     }
+
+    // 끝 표시 (-1)
+    colormap_ironblack[numColors * 3] = -1;
 }
 
 void customizePalette(){
