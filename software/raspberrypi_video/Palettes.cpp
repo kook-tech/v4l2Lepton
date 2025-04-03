@@ -3026,42 +3026,50 @@ int get_size_colormap_grayscale() {
 int get_size_colormap_ironblack() {
     return get_size_colormap(colormap_ironblack);
 }
-void customizePalette(int sigMin, int sigMax){
-    int custom_colormap[3000];
-    const int* base = colormap_ironblack; // 원본 팔레트
+void customizePalette(int sigMin, int sigMax) {
+    const int* base = colormap_ironblack;
     const int numColors = get_size_colormap_ironblack() / 3;
 
-    const int lower_range = numColors * 0.2;  // 앞 20%
-    const int middle_range = numColors * 0.6; // 중간 60%
-    const int upper_range = numColors * 0.2;  // 뒤 20%
+    int custom_colormap[numColors * 3];
+
+    const int rangeMin = 27315;
+    const int rangeMax = 41315;
 
     for (int i = 0; i < numColors; ++i) {
-        int value; // 가상적인 value 값
+        float ratio = static_cast<float>(i) / numColors;
+        int thermalValue;
 
-        if (i < lower_range) {
-            // sigMin보다 작은 값에 해당하는 색상 복사
-            value = i * (sigMin) / lower_range;
-        } else if (i >= lower_range && i < lower_range + middle_range) {
-            // sigMin ~ sigMax 사이 매핑
-            float ratio = (float)(i - lower_range) / middle_range;
-            value = sigMin + ratio * (sigMax - sigMin);
+        if (ratio < 0.2f) {
+            // 앞 20% → rangeMin ~ sigMin
+            float subRatio = ratio / 0.2f;
+            thermalValue = rangeMin + subRatio * (sigMin - rangeMin);
+        } else if (ratio < 0.8f) {
+            // 중간 60% → sigMin ~ sigMax
+            float subRatio = (ratio - 0.2f) / 0.6f;
+            thermalValue = sigMin + subRatio * (sigMax - sigMin);
         } else {
-            // sigMax보다 큰 값에 해당하는 색상 복사
-            float ratio = (float)(i - (lower_range + middle_range)) / upper_range;
-            value = sigMax + ratio * (65535 - sigMax);
+            // 뒤 20% → sigMax ~ rangeMax
+            float subRatio = (ratio - 0.8f) / 0.2f;
+            thermalValue = sigMax + subRatio * (rangeMax - sigMax);
         }
 
-        // base 팔레트에서 색상 복사
+        // thermalValue는 사실 색상 자체에 영향을 주지 않고,
+        // 색상 인덱스를 그대로 복사하는 구조라면 의미는 연산 흐름용임.
+        // 다만 향후 색상 재매핑시에도 thermalValue 기준으로 정렬될 수 있음.
+
+        // 원본 컬러맵에서 같은 인덱스 위치의 색상 가져오기
         int idx = i * 3;
         custom_colormap[idx + 0] = base[idx + 0];
         custom_colormap[idx + 1] = base[idx + 1];
         custom_colormap[idx + 2] = base[idx + 2];
     }
-    // 🔥 원본 colormap_ironblack에 덮어쓰기
+
+    // 원본 팔레트 덮어쓰기
     for (int i = 0; i < numColors * 3; ++i) {
         colormap_ironblack[i] = custom_colormap[i];
     }
 }
+
 void customizePalette(){
 
 }
