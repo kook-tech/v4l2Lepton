@@ -9,4 +9,5 @@ extern int get_size_colormap_grayscale();
 extern int get_size_colormap_ironblack();
 //
 extern void customizePalette(int sigMin, int sigMax);
+extern void customizePalette();
 #endif
