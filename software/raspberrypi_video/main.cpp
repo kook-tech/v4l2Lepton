@@ -1,7 +1,7 @@
 #include <iostream>
 #include <cstring>
 #include <unistd.h>
-
+#include "Palettes.h"
 #include "LeptonThread.h"
 
 void printUsage(char *cmd) {
@@ -31,6 +31,9 @@ int main(int argc, char **argv) {
     int rangeMin = -1;      
     int rangeMax = -1;
     int loglevel = 0;
+    //target temperature
+    int sigMin = -1;
+    int sigMax = -1;
 
     // 🔹 명령줄 인자 파싱
     for (int i = 1; i < argc; i++) {
@@ -70,25 +73,42 @@ int main(int argc, char **argv) {
                 rangeMax = val;
                 i++;
             }
+        }else if (strcmp(argv[i], "-sigmin") == 0 && (i + 1 != argc)) {
+            int val = std::atoi(argv[i + 1]);
+            if (0 <= val && val <= 65535) {
+                sigMin = val;
+                i++;
+            }
+        }else if (strcmp(argv[i], "-sigmax") == 0 && (i + 1 != argc)) {
+            int val = std::atoi(argv[i + 1]);
+            if (0 <= val && val <= 65535) {
+                sigMax = val;
+                i++;
+            }
         }
+
     }
 
-    // ✅ V4L2 및 Lepton 초기화 수행
+
     LeptonThread *thread = new LeptonThread();
     thread->setLogLevel(loglevel);
+    // sigMin과 sigMax으로 PaletteCustomizing
+    if (sigMin >= 0 && sigMax >= 0) customizePalette(sigMin, sigMax);
+    else customizePalette();
+    //
     thread->useColormap(typeColormap);
     thread->useLepton(typeLepton);
     thread->useSpiSpeedMhz(spiSpeed);
     thread->setAutomaticScalingRange();
     if (rangeMin >= 0) thread->useRangeMinValue(rangeMin);
     if (rangeMax >= 0) thread->useRangeMaxValue(rangeMax);
-
-    // ✅ V4L2 스트리밍을 위한 스레드 실행
+    
+    
     thread->start();
 
-    // ✅ V4L2 루프 유지
+    
     while (true) {
-        usleep(100000);  // 100ms 대기
+        usleep(100000);  
     }
 
     return 0;

@@ -288,6 +288,7 @@ void LeptonThread::printRawThermalData(int col, int row, uint16_t val){
 	float celcius = (float)((val - 27315) / 100.0);
 	printf("(%d, %d) = %.f \n",row,col, celcius);
 	// printf("(%d, %d) = %u \n",row,col, val);
+
 }
 
 void LeptonThread::log_message(uint16_t level, std::string msg)
@@ -332,6 +333,7 @@ void LeptonThread::open_vpipe() {
     }
 
 }
+
 
 
 
