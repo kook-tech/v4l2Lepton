@@ -3029,7 +3029,7 @@ int get_size_colormap_ironblack() {
 void customizePalette(int sigMin, int sigMax) {
     const int* base = colormap_ironblack;
     const int numColors = get_size_colormap_ironblack() / 3;  // 보통 1000
-    int custom_colormap[3000]; // 1000 * 3 (R,G,B)
+    int custom_colormap[9000]; // 1000 * 3 (R,G,B)
 
     int p20 = numColors * 0.2;
     int p60 = numColors * 0.6;
