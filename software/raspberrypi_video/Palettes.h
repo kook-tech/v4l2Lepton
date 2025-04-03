@@ -8,6 +8,6 @@ extern int get_size_colormap_rainbow();
 extern int get_size_colormap_grayscale();
 extern int get_size_colormap_ironblack();
 //
-extern void customizePalette(int sigMin, int sigMax);
+extern void customizePalette(int sigMin, int sigMax, int rangeMin, int rangeMax);
 extern void customizePalette();
 #endif

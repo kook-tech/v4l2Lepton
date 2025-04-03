@@ -246,7 +246,8 @@ void LeptonThread::run()
 				}
 				//##############################
 				//온도 데이터인 valueFrameBuffer를 가지고 컬러팔레트에 매핑을 하는 부분입니다.
-				value = (valueFrameBuffer - minValue) * scale;
+								//
+				value = valueFrameBuffer-minValue;
 				int ofs_r = 3 * value + 0; if (colormapSize <= ofs_r) ofs_r = colormapSize - 1;
 				int ofs_g = 3 * value + 1; if (colormapSize <= ofs_g) ofs_g = colormapSize - 1;
 				int ofs_b = 3 * value + 2; if (colormapSize <= ofs_b) ofs_b = colormapSize - 1;

@@ -62,28 +62,36 @@ int main(int argc, char **argv) {
                 i++;
             }
         } else if (strcmp(argv[i], "-min") == 0 && (i + 1 != argc)) {
-            int val = std::atoi(argv[i + 1]);
+            float valf = std::atoi(argv[i + 1]);
+	    int val = (valf + 273.15)*100;
             if (0 <= val && val <= 65535) {
                 rangeMin = val;
                 i++;
+		printf("min :  %f(C) -> %d(CK) \n", valf, val);
             }
         } else if (strcmp(argv[i], "-max") == 0 && (i + 1 != argc)) {
-            int val = std::atoi(argv[i + 1]);
+            float valf = std::atoi(argv[i + 1]);
+	    int val = (valf + 273.15)*100;
             if (0 <= val && val <= 65535) {
                 rangeMax = val;
                 i++;
+		printf("max :  %f(C) -> %d(CK) \n", valf, val);
             }
         }else if (strcmp(argv[i], "-sigmin") == 0 && (i + 1 != argc)) {
-            int val = std::atoi(argv[i + 1]);
+            float valf = std::atoi(argv[i + 1]);
+	    int val = (valf + 273.15)*100;
             if (0 <= val && val <= 65535) {
                 sigMin = val;
                 i++;
+		printf("sigMin :  %f(C) -> %d(CK) \n", valf, val);
             }
         }else if (strcmp(argv[i], "-sigmax") == 0 && (i + 1 != argc)) {
-            int val = std::atoi(argv[i + 1]);
+            float valf = std::atoi(argv[i + 1]);
+	    int val = (valf + 273.15)*100;
             if (0 <= val && val <= 65535) {
                 sigMax = val;
                 i++;
+		printf("sigMax :  %f(C) -> %d(CK) \n", valf, val);
             }
         }
 
@@ -93,7 +101,7 @@ int main(int argc, char **argv) {
     LeptonThread *thread = new LeptonThread();
     thread->setLogLevel(loglevel);
     // sigMin과 sigMax으로 PaletteCustomizing
-    if (sigMin >= 0 && sigMax >= 0) customizePalette(sigMin, sigMax);
+    if (sigMin >= 0 && sigMax >= 0) customizePalette(sigMin, sigMax, rangeMin, rangeMax);
     else customizePalette();
     //
     thread->useColormap(typeColormap);
