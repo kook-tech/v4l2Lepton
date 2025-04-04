@@ -118,7 +118,7 @@ void LeptonThread::run()
 	uint16_t minValue = rangeMin;
 	uint16_t maxValue = rangeMax;
 	float diff = maxValue - minValue;
-	float scale = 255/diff;
+	float scale = 3000/diff;
 	uint16_t n_wrong_segment = 0;
 	uint16_t n_zero_value_drop_frame = 0;
 
@@ -249,7 +249,7 @@ void LeptonThread::run()
 				//온도 데이터인 valueFrameBuffer를 가지고 컬러팔레트에 매핑을 하는 부분입니다.
 								//
 				
-				value = valueFrameBuffer-minValue;
+				value = (valueFrameBuffer-minValue)*scale;
 				
 				int ofs_r = 3 * value + 0; if (colormapSize <= ofs_r) ofs_r = colormapSize - 1;
 				int ofs_g = 3 * value + 1; if (colormapSize <= ofs_g) ofs_g = colormapSize - 1;
@@ -268,7 +268,7 @@ void LeptonThread::run()
 				// printRawThermalData(column,row,valueFrameBuffer);
 			}
 		}
-
+		//printf("minValue : %d , maxValue : %d , diff : %f , scale : %f\n", minValue, maxValue, diff, scale);
 		if (n_zero_value_drop_frame != 0) {
 			log_message(8, "[WARNING] Found zero-value. Drop the frame continuously " + std::to_string(n_zero_value_drop_frame) + " times [RECOVERED]");
 			n_zero_value_drop_frame = 0;
