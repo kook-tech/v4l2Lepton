@@ -3038,7 +3038,6 @@ void customizePalette(int sigMin, int sigMax, int rangeMin, int rangeMax) {
 
     const int base_min = rangeMin == -1 ? 26315 : rangeMin;
     const int base_max = rangeMax == -1 ? 41315 : rangeMax;
-    printf("base_min/max %d %d", base_min, base_max);
     
     for (int i = 0; i < numColors; ++i) {
     	// i → targetTemp 계산
@@ -3050,10 +3049,10 @@ void customizePalette(int sigMin, int sigMax, int rangeMin, int rangeMax) {
     	if (targetTemp < sigMin) {
         	float subNorm = (float)(targetTemp - base_min) / (sigMin - base_min);
         	colorIdx = (int)(subNorm * (numColors * 0.2));
-   	 } else if (targetTemp <= sigMax) {
+   	    } else if (targetTemp <= sigMax) {
        	 	float subNorm = (float)(targetTemp - sigMin) / (sigMax - sigMin);
         	colorIdx = (int)(numColors * 0.2 + subNorm * (numColors * 0.6));
-   	 } else {
+   	    } else {
         	float subNorm = (float)(targetTemp - sigMax) / (base_max - sigMax);
        		colorIdx = (int)(numColors * 0.8 + subNorm * (numColors * 0.2));
     	}
@@ -3063,22 +3062,24 @@ void customizePalette(int sigMin, int sigMax, int rangeMin, int rangeMax) {
     	custom_colormap[i * 3 + 1] = base[colorIdx * 3 + 1];
     	custom_colormap[i * 3 + 2] = base[colorIdx * 3 + 2];
     }
+
     // 덮어쓰기
-    printf("[0] : ");
     for (int i = 0; i < numColors * 3; ++i) {
         colormap_ironblack[i] = custom_colormap[i];
     }
-    printf("numcolors : %d\n", numColors );
+    
     
     //csv저장 및 출력
-    printf("\n온도 : %.1f ~ %.1f 를 팔레트에 매핑\n타겟 온도: %.1f ~ %.1f 를 팔레트 60%%할당 \n ",
+    printf("\n온도 : %.1f ~ %.1f 를 팔레트에 매핑\n타겟 온도: %.1f ~ %.1f 에 기존 팔레트 60%% 할당 \n ",
        (rangeMin - 27315) / 100.0,
        (rangeMax - 27315) / 100.0,
        (sigMin - 27315) / 100.0,
        (sigMax - 27315) / 100.0 );
+
     int size = get_size_colormap_ironblack();
-    printf("ironblack size : %d\n", get_size_colormap_ironblack() );
     exportColormapToCSV(colormap_ironblack, size);
+    //printf("ironblack size : %d\n", get_size_colormap_ironblack() );
+    
 }
 
 void exportColormapToCSV(int* colormap, int size){
@@ -3100,11 +3101,11 @@ void exportColormapToCSV(int* colormap, int size){
 double sigmoid(double x) {
     return 100.0 / (1.0 + exp(-0.2 * (x - 20.0)));
 }
-
+//미구현 ( 시그모이드 함수로 컬러팔레트 커스터마이징 메서드 )
 void customizePalette(){
     int size = get_size_colormap_ironblack();
-    printf("ironblack size : %d\n", get_size_colormap_ironblack() );
     exportColormapToCSV(colormap_ironblack, size);
+    printf("ironblack size : %d\n", get_size_colormap_ironblack() );
     /*for (int i = 0; i < NUM_COLORS; i++) {
         double x = (100.0 * i) / (NUM_COLORS - 1);  // 0 ~ 100
         double value = sigmoid(x); // 0 ~ 100

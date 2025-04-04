@@ -118,7 +118,8 @@ void LeptonThread::run()
 	uint16_t minValue = rangeMin;
 	uint16_t maxValue = rangeMax;
 	float diff = maxValue - minValue;
-	float scale = 3000/diff;
+	float scale = 3000/diff; 
+	// 온도 민감도 0.05 -> -10 ~ 140도는 3000개 컬러맵 필요. ( -10 ~ 140 : default gain mode - high )
 	uint16_t n_wrong_segment = 0;
 	uint16_t n_zero_value_drop_frame = 0;
 
@@ -162,8 +163,6 @@ void LeptonThread::run()
 			log_message(3, "done reading, resets: " + std::to_string(resets));
 		}
 
-
-		//
 		int iSegmentStart = 1;
 		int iSegmentStop;
 		if (typeLepton == 3) {
@@ -220,7 +219,7 @@ void LeptonThread::run()
 				}
 			}
 			diff = maxValue - minValue;
-			scale = 255/diff;
+			scale = 3000/diff;
 		}
 
 		int row, column;
@@ -247,8 +246,7 @@ void LeptonThread::run()
 				}
 				//##############################
 				//온도 데이터인 valueFrameBuffer를 가지고 컬러팔레트에 매핑을 하는 부분입니다.
-								//
-				
+				// scale을 곱해서 min ~ max 범위에 대한 온도만 컬러맵에 매핑
 				value = (valueFrameBuffer-minValue)*scale;
 				
 				int ofs_r = 3 * value + 0; if (colormapSize <= ofs_r) ofs_r = colormapSize - 1;
@@ -265,10 +263,15 @@ void LeptonThread::run()
 				}
 				myImage.setPixel(column, row, color);
 				//###############################
-				// printRawThermalData(column,row,valueFrameBuffer);
+
+				//픽셀별 rawTemperature 데이터 출력 메서드 (단위 centiKelvin)
+				//printRawThermalData(column,row,valueFrameBuffer); 
+				
 			}
 		}
+		//각 프레임에 적용된 min, max, diff, scale 값 디버깅 ( min/max 미지정시 auto모드로 인해 매번 변함 )
 		//printf("minValue : %d , maxValue : %d , diff : %f , scale : %f\n", minValue, maxValue, diff, scale);
+
 		if (n_zero_value_drop_frame != 0) {
 			log_message(8, "[WARNING] Found zero-value. Drop the frame continuously " + std::to_string(n_zero_value_drop_frame) + " times [RECOVERED]");
 			n_zero_value_drop_frame = 0;
@@ -290,9 +293,10 @@ void LeptonThread::performFFC() {
 
 void LeptonThread::printRawThermalData(int col, int row, uint16_t val){
 	float celcius = (float)((val - 27315) / 100.0);
+	//celcius로 출력
 	printf("(%d, %d) = %.f \n",row,col, celcius);
+	//centiKelvin으로 출력
 	// printf("(%d, %d) = %u \n",row,col, val);
-
 }
 
 void LeptonThread::log_message(uint16_t level, std::string msg)
