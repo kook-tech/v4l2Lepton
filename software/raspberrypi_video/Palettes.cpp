@@ -3040,56 +3040,59 @@ void customizePalette(int sigMin, int sigMax, int rangeMin, int rangeMax) {
     const int base_min = rangeMin == -1 ? 26315 : rangeMin;
     const int base_max = rangeMax == -1 ? 41315 : rangeMax;
     printf("base_min/max %d %d", base_min, base_max);
-
+    
     for (int i = 0; i < numColors; ++i) {
-        int targetTemp;
+    	// i → targetTemp 계산
+    	float ratio = (float)i / (numColors - 1);
+    	int targetTemp = base_min + ratio * (base_max - base_min);
 
-        if (i < numColors * 0.2) {
-            // sigMin보다 작은 값
-            float ratio = (float)i / (numColors * 0.2);
-            targetTemp = base_min + ratio * (sigMin - base_min);
-        } else if (i < numColors * 0.8) {
-            // sigMin ~ sigMax
-            float ratio = (float)(i - numColors * 0.2) / (numColors * 0.6);
-            targetTemp = sigMin + ratio * (sigMax - sigMin);
-        } else {
-            // sigMax보다 큰 값
-            float ratio = (float)(i - numColors * 0.8) / (numColors * 0.2);
-            targetTemp = sigMax + ratio * (base_max - sigMax);
-        }
+    	// targetTemp → colorIdx 계산
+    	int colorIdx;
+    	if (targetTemp < sigMin) {
+        	float subNorm = (float)(targetTemp - base_min) / (sigMin - base_min);
+        	colorIdx = (int)(subNorm * (numColors * 0.2));
+   	 } else if (targetTemp <= sigMax) {
+       	 	float subNorm = (float)(targetTemp - sigMin) / (sigMax - sigMin);
+        	colorIdx = (int)(numColors * 0.2 + subNorm * (numColors * 0.6));
+   	 } else {
+        	float subNorm = (float)(targetTemp - sigMax) / (base_max - sigMax);
+       		colorIdx = (int)(numColors * 0.8 + subNorm * (numColors * 0.2));
+    	}
 
-        // 색상 인덱스 매핑
-        float normalized = (float)(targetTemp - base_min) / (base_max - base_min);
-        if (normalized < 0.0f) normalized = 0.0f;
-        if (normalized > 1.0f) normalized = 1.0f;
-
-        int colorIdx = (int)(normalized * (numColors - 1));
-
-        custom_colormap[i * 3 + 0] = base[colorIdx * 3 + 0];
-        custom_colormap[i * 3 + 1] = base[colorIdx * 3 + 1];
-        custom_colormap[i * 3 + 2] = base[colorIdx * 3 + 2];
+    	// 색상 복사
+    	custom_colormap[i * 3 + 0] = base[colorIdx * 3 + 0];
+    	custom_colormap[i * 3 + 1] = base[colorIdx * 3 + 1];
+    	custom_colormap[i * 3 + 2] = base[colorIdx * 3 + 2];
     }
-
     // 덮어쓰기
-    for (int i = 0; i < numColors * 3; ++i) {
+    for (int i = 0; i < numColors * 3-3; ++i) {
         colormap_ironblack[i] = custom_colormap[i];
+//	printf("%d",colormap_ironblack[i]);
     }
-    colormap_ironblack[numColors * 3] = -1;
-
+    
     //csv저장 및 출력
-    printf("\n온도 : %.1f ~ %.1f 를 팔레트에 매핑\n타겟 온도: %.1f ~ %.1f 를 팔레트 60%%할당 \n",
+    printf("\n온도 : %.1f ~ %.1f 를 팔레트에 매핑\n타겟 온도: %.1f ~ %.1f 를 팔레트 60%%할당 \n ",
        (rangeMin - 27315) / 100.0,
        (rangeMax - 27315) / 100.0,
        (sigMin - 27315) / 100.0,
-       (sigMax - 27315) / 100.0);
+       (sigMax - 27315) / 100.0 );
     int size = get_size_colormap_ironblack();
     exportColormapToCSV(colormap_ironblack, size);
 }
-
 void customizePalette(){
+    /*for (int i = 0; i < NUM_COLORS; i++) {
+        double x = (100.0 * i) / (NUM_COLORS - 1);  // 0 ~ 100
+        double value = sigmoid(x); // 0 ~ 100
+        int r = (int)(255.0 * (value / 100.0)); // 빨간색 성분
+        int g = 0; // 녹색 성분 없음
+        int b = 255 - r; // 파란색은 반비례
 
+        colormap_sigmoid[i * 3 + 0] = r;
+        colormap_sigmoid[i * 3 + 1] = g;
+        colormap_sigmoid[i * 3 + 2] = b;
+    }
+    */
 }
-
 void exportColormapToCSV(int* colormap, int size){
     std::ofstream file("colormap.csv");
     if (!file.is_open()) {
@@ -3104,4 +3107,8 @@ void exportColormapToCSV(int* colormap, int size){
 
     file.close();
     std::cout << "컬러맵을 colormap.csv로 저장 완료\n";
+}
+
+double sigmoid(double x) {
+    return 100.0 / (1.0 + exp(-0.2 * (x - 20.0)));
 }
