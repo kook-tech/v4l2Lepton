@@ -62,16 +62,18 @@ int main(int argc, char **argv) {
                 i++;
             }
         } else if (strcmp(argv[i], "-min") == 0 && (i + 1 != argc)) {
-            float valf = std::atoi(argv[i + 1]);
-	    int val = (valf + 273.15)*100+1;
-            if (0 <= val && val <= 65535) {
+            //int val = std::atoi(argv[i +1]);
+	    float valf = std::atoi(argv[i + 1]);
+            int val = (int)((valf + 273.15f) * 100.0f + 0.5f);
+	    if (0 <= val && val <= 65535) {
                 rangeMin = val;
                 i++;
 		printf("min :  %.f ( C ) -> %d ( CK ) \n", valf, val);
             }
         } else if (strcmp(argv[i], "-max") == 0 && (i + 1 != argc)) {
+	    //int val = std::atoi(argv[i +1]);
             float valf = std::atoi(argv[i + 1]);
-	    int val = (valf + 273.15)*100+1;
+            int val = (int)((valf + 273.15f) * 100.0f + 0.5f);
             if (0 <= val && val <= 65535) {
                 rangeMax = val;
                 i++;
@@ -79,7 +81,7 @@ int main(int argc, char **argv) {
             }
         }else if (strcmp(argv[i], "-sigmin") == 0 && (i + 1 != argc)) {
             float valf = std::atoi(argv[i + 1]);
-	    int val = (valf + 273.15)*100+1;
+            int val = (int)((valf + 273.15f) * 100.0f + 0.5f);
             if (0 <= val && val <= 65535) {
                 sigMin = val;
                 i++;
@@ -87,7 +89,7 @@ int main(int argc, char **argv) {
             }
         }else if (strcmp(argv[i], "-sigmax") == 0 && (i + 1 != argc)) {
             float valf = std::atoi(argv[i + 1]);
-	    int val = (valf + 273.15)*100+1;
+            int val = (int)((valf + 273.15f) * 100.0f + 0.5f);
             if (0 <= val && val <= 65535) {
                 sigMax = val;
                 i++;
