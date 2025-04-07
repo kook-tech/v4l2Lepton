@@ -6146,11 +6146,13 @@ void customizePalette2(int sigMin, int sigMax, int rangeMin, int rangeMax) {
     
     
     //csv저장 및 출력
-    printf("\n온도 : %.1f ~ %.1f 를 팔레트에 매핑\nnormal 온도: %.1f ~ %.1f 는 grayscale 적용 \n온도 > normal : yellow ~ red\n온도 < normal : Deep blue ~ blue\n ",
+    printf("\n온도 : %.1f°C ~ %.1f°C 를 팔레트에 매핑\n\t<< normal >> \n%.1f°C ~ %.1f°C -> grayscale 적용 \n\t<< abnormal >> \n온도 > %.1f°C  : yellow ~ red 적용 \n온도 <  %.1f°C  : Deep blue ~ blue 적용\n",
        (rangeMin - 27315) / 100.0,
        (rangeMax - 27315) / 100.0,
        (sigMin - 27315) / 100.0,
-       (sigMax - 27315) / 100.0 );
+       (sigMax - 27315) / 100.0,
+       (sigMin - 27315) / 100.0,
+       (sigMax - 27315) / 100.0);
     
 
     int size = get_size_colormap_custom();
