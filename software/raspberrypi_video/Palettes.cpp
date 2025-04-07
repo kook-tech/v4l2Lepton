@@ -6017,6 +6017,7 @@ int colormap_custom[] = {
 255,0,0,
 255,0,0,
 255,0,0,
+-1
 };
 int get_size_colormap(const int colormap[]) {
     int n = 0;
