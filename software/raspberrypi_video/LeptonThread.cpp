@@ -62,6 +62,11 @@ void LeptonThread::useColormap(int newTypeColormap)
 		selectedColormap = colormap_grayscale;
 		selectedColormapSize = get_size_colormap_grayscale();
 		break;
+	case 4:
+		typeColormap = 4;
+		selectedColormap = colormap_custom;
+		selectedColormapSize = get_size_colormap_custom();
+		break;
 	default:
 		typeColormap = 3;
 		selectedColormap = colormap_ironblack;
