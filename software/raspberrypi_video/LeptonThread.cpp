@@ -317,14 +317,17 @@ void LeptonThread::updateVpipe()
 	tmpImage = myImage.convertToFormat(QImage::Format_RGB888);
 	memcpy(vidsendbuf, tmpImage.bits(), tmpImage.width()*tmpImage.height()*3);
 	write(v4l2sink, vidsendbuf,tmpImage.width()*tmpImage.height()*3);
+	write(v4l2sink2,vidsendbuf,tmpImage.width()*tmpImage.height()*3);
+
 
 }
 
 void LeptonThread::open_vpipe() {
     int vidsendsiz;
 
-    v4l2sink = open("/dev/video3", O_WRONLY);
-    if (v4l2sink < 0) {
+    v4l2sink = open("/dev/video4", O_WRONLY);
+	v4l2sink2 = open("/dev/video5", O_WRONLY);
+    if (v4l2sink < 0 || v4l2sink2 < 0) {
         fprintf(stderr, "Failed to open v4l2sink device. (%s)\n", strerror(errno));
         exit(-2);
     }
@@ -338,12 +341,14 @@ void LeptonThread::open_vpipe() {
     v.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB24;
     vidsendsiz = 320 * 240 * 3;
     vidsendbuf = (uchar*)malloc(vidsendsiz);
+	
 
     v.fmt.pix.sizeimage = vidsendsiz;
-    if (ioctl(v4l2sink, VIDIOC_S_FMT, &v) < 0) {
+    if (ioctl(v4l2sink, VIDIOC_S_FMT, &v) < 0 || ioctl(v4l2sink2, VIDIOC_S_FMT, &v) < 0 ) {
         fprintf(stderr, "Failed to set format on v4l2sink. (%s)\n", strerror(errno));
         exit(-1);
     }
+	
 
 }
 
