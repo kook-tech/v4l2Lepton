@@ -56,12 +56,15 @@ private:
   int myImageWidth;
   int myImageHeight;
   QImage myImage;
-  uchar*  vidsendbuf;
+  uchar *vidsendbuf;
+
+  uchar*  vidsendbuf2;
 
   uint8_t result[PACKET_SIZE*PACKETS_PER_FRAME];
   uint8_t shelf[4][PACKET_SIZE*PACKETS_PER_FRAME];
   uint16_t *frameBuffer;
   int v4l2sink;
+  
   int v4l2sink2;
 };
 

@@ -6100,7 +6100,7 @@ void exportColormapToCSV(int* colormap, int size){
     }
 
     file.close();
-    std::cout << "컬러맵을 colormap.csv로 저장 완료\n";
+    std::cout << "The colormap is saved with the filename colormap.csv.\n";
 }
 
 double sigmoid(double x) {
@@ -6146,7 +6146,7 @@ void customizePalette2(int sigMin, int sigMax, int rangeMin, int rangeMax) {
     
     
     //csv저장 및 출력
-    printf("\n온도 : %.1f°C ~ %.1f°C 를 팔레트에 매핑\n\t<< normal >> \n%.1f°C ~ %.1f°C -> grayscale 적용 \n\t<< abnormal >> \n온도 > %.1f°C  : yellow ~ red 적용 \n온도 <  %.1f°C  : Deep blue ~ blue 적용\n",
+    printf("\ndetect temperature : %.1f°C ~ %.1f°C\n\t<< normal >> \ngrayscaled temperature : %.1f°C ~ %.1f°C \n\t<< abnormal >> \ntemperature < %.1f°C  : mapped Deep blue ~ blue  \ntemperature >  %.1f°C  : mapped yellow ~ red \n",
        (rangeMin - 27315) / 100.0,
        (rangeMax - 27315) / 100.0,
        (sigMin - 27315) / 100.0,
