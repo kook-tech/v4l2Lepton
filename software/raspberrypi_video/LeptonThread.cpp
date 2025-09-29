@@ -323,7 +323,7 @@ void LeptonThread::updateVpipe()
 void LeptonThread::open_vpipe() {
     int vidsendsiz;
 
-    v4l2sink = open("/dev/video3", O_WRONLY);
+    v4l2sink = open("/dev/video12", O_WRONLY);
     if (v4l2sink < 0) {
         fprintf(stderr, "Failed to open v4l2sink device. (%s)\n", strerror(errno));
         exit(-2);
