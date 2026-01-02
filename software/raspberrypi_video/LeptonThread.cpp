@@ -227,10 +227,14 @@ void LeptonThread::run()
 			scale = 3000/diff;
 		}
 
+		// QImage의 bits()를 직접 사용하여 setPixel() 오버헤드 제거
+		uchar* imageBits = myImage.bits();
+		int bytesPerLine = myImage.bytesPerLine();
+		
 		int row, column;
 		uint16_t value;
 		uint16_t valueFrameBuffer;
-		QRgb color;
+		uint8_t r, g, b;
 		for(int iSegment = iSegmentStart; iSegment <= iSegmentStop; iSegment++) {
 			int ofsRow = 30 * (iSegment - 1);
 			for(int i=0;i<FRAME_SIZE_UINT16;i++) {
@@ -257,7 +261,9 @@ void LeptonThread::run()
 				int ofs_r = 3 * value + 0; if (colormapSize <= ofs_r) ofs_r = colormapSize - 1;
 				int ofs_g = 3 * value + 1; if (colormapSize <= ofs_g) ofs_g = colormapSize - 1;
 				int ofs_b = 3 * value + 2; if (colormapSize <= ofs_b) ofs_b = colormapSize - 1;
-				color = qRgb(colormap[ofs_r], colormap[ofs_g], colormap[ofs_b]);
+				r = colormap[ofs_r];
+				g = colormap[ofs_g];
+				b = colormap[ofs_b];
 				if (typeLepton == 3) {
 					column = (i % PACKET_SIZE_UINT16) - 2 + (myImageWidth / 2) * ((i % (PACKET_SIZE_UINT16 * 2)) / PACKET_SIZE_UINT16);
 					row = i / PACKET_SIZE_UINT16 / 2 + ofsRow;
@@ -266,7 +272,11 @@ void LeptonThread::run()
 					column = (i % PACKET_SIZE_UINT16) - 2;
 					row = i / PACKET_SIZE_UINT16;
 				}
-				myImage.setPixel(column, row, color);
+				// setPixel() 대신 직접 메모리에 쓰기로 성능 최적화
+				uchar* pixelPtr = imageBits + row * bytesPerLine + column * 3;
+				pixelPtr[0] = r;
+				pixelPtr[1] = g;
+				pixelPtr[2] = b;
 				//###############################
 
 				//픽셀별 rawTemperature 데이터 출력 메서드 (단위 centiKelvin)
@@ -282,8 +292,6 @@ void LeptonThread::run()
 			n_zero_value_drop_frame = 0;
 		}
 
-		//lets emit the signal for update
-		emit updateImage(myImage);
 		updateVpipe();
 	}
 	
@@ -313,11 +321,11 @@ void LeptonThread::log_message(uint16_t level, std::string msg)
 
 void LeptonThread::updateVpipe()
 {
-	QImage tmpImage;
-	tmpImage = myImage.convertToFormat(QImage::Format_RGB888);
-	memcpy(vidsendbuf, tmpImage.bits(), tmpImage.width()*tmpImage.height()*3);
-	write(v4l2sink, vidsendbuf,tmpImage.width()*tmpImage.height()*3);
-
+	// QImage가 이미 Format_RGB888이므로 불필요한 변환 제거
+	// bits()를 직접 사용하여 메모리 복사 최소화
+	int imageSize = myImageWidth * myImageHeight * 3;
+	memcpy(vidsendbuf, myImage.bits(), imageSize);
+	write(v4l2sink, vidsendbuf, imageSize);
 }
 
 void LeptonThread::open_vpipe() {

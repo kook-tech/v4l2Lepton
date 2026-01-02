@@ -6,7 +6,6 @@
 
 #include <QThread>
 #include <QtCore>
-#include <QPixmap>
 #include <QImage>
 
 #define PACKET_SIZE 164
@@ -37,8 +36,7 @@ public slots:
   void performFFC();
 
 signals:
-  void updateText(QString);
-  void updateImage(QImage);
+  // Qt GUI를 사용하지 않으므로 시그널 제거
 
 private:
 
