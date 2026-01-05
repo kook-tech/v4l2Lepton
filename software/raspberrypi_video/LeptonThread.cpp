@@ -37,8 +37,7 @@ LeptonThread::LeptonThread() : QThread()
 	autoRangeMax = true;
 	rangeMin = 30000;
 	rangeMax = 32000;
-	myImage = QImage(myImageWidth, myImageHeight, QImage::Format_RGB888);
-        open_vpipe();
+	open_vpipe();
 }
 
 LeptonThread::~LeptonThread() {
@@ -115,9 +114,6 @@ void LeptonThread::useRangeMaxValue(uint16_t newMaxValue)
 
 void LeptonThread::run()
 {
-	//create the initial image
-	myImage = QImage(myImageWidth, myImageHeight, QImage::Format_RGB888);
-
 	const int *colormap = selectedColormap;
 	const int colormapSize = selectedColormapSize;
 	uint16_t minValue = rangeMin;
@@ -127,6 +123,11 @@ void LeptonThread::run()
 	// 온도 민감도 0.05 -> -10 ~ 140도는 3000개 컬러맵 필요. ( -10 ~ 140 : default gain mode - high )
 	uint16_t n_wrong_segment = 0;
 	uint16_t n_zero_value_drop_frame = 0;
+	
+	// YUYV422 버퍼: 2 pixels per 4 bytes
+	// 홀수 픽셀 처리를 위한 임시 저장
+	uint8_t prev_r = 0, prev_g = 0, prev_b = 0;
+	bool has_prev_pixel = false;
 
 	//open spi port
 	SpiOpenPort(0, spiSpeed);
@@ -227,9 +228,10 @@ void LeptonThread::run()
 			scale = 3000/diff;
 		}
 
-		// QImage의 bits()를 직접 사용하여 setPixel() 오버헤드 제거
-		uchar* imageBits = myImage.bits();
-		int bytesPerLine = myImage.bytesPerLine();
+		// QImage 제거: 컬러맵에서 RGB를 가져와 바로 YUYV422로 변환
+		// YUYV422는 2 pixels per 4 bytes (Y0 U Y1 V)
+		uchar* yuyvPtr = vidsendbuf;
+		has_prev_pixel = false;
 		
 		int row, column;
 		uint16_t value;
@@ -264,6 +266,7 @@ void LeptonThread::run()
 				r = colormap[ofs_r];
 				g = colormap[ofs_g];
 				b = colormap[ofs_b];
+				
 				if (typeLepton == 3) {
 					column = (i % PACKET_SIZE_UINT16) - 2 + (myImageWidth / 2) * ((i % (PACKET_SIZE_UINT16 * 2)) / PACKET_SIZE_UINT16);
 					row = i / PACKET_SIZE_UINT16 / 2 + ofsRow;
@@ -272,17 +275,66 @@ void LeptonThread::run()
 					column = (i % PACKET_SIZE_UINT16) - 2;
 					row = i / PACKET_SIZE_UINT16;
 				}
-				// setPixel() 대신 직접 메모리에 쓰기로 성능 최적화
-				uchar* pixelPtr = imageBits + row * bytesPerLine + column * 3;
-				pixelPtr[0] = r;
-				pixelPtr[1] = g;
-				pixelPtr[2] = b;
+				
+				// RGB → YUYV422 직접 변환 (2 pixels per 4 bytes)
+				if (!has_prev_pixel) {
+					// 첫 번째 픽셀 저장
+					prev_r = r;
+					prev_g = g;
+					prev_b = b;
+					has_prev_pixel = true;
+				} else {
+					// 두 번째 픽셀과 함께 YUYV422 변환
+					// YUV 변환 (ITU-R BT.601, 정수 연산)
+					int y1 = ((77 * prev_r + 150 * prev_g + 29 * prev_b) >> 8);
+					int y2 = ((77 * r + 150 * g + 29 * b) >> 8);
+					
+					// U, V는 두 픽셀의 평균 사용
+					int r_avg = (prev_r + r) >> 1;
+					int g_avg = (prev_g + g) >> 1;
+					int b_avg = (prev_b + b) >> 1;
+					int u = ((-43 * r_avg - 85 * g_avg + 128 * b_avg) >> 8) + 128;
+					int v = ((128 * r_avg - 107 * g_avg - 21 * b_avg) >> 8) + 128;
+					
+					// 클램핑 (0-255)
+					y1 = (y1 < 0) ? 0 : (y1 > 255) ? 255 : y1;
+					y2 = (y2 < 0) ? 0 : (y2 > 255) ? 255 : y2;
+					u = (u < 0) ? 0 : (u > 255) ? 255 : u;
+					v = (v < 0) ? 0 : (v > 255) ? 255 : v;
+					
+					// YUYV422 포맷: Y0 U Y1 V
+					*yuyvPtr++ = (uchar)y1;
+					*yuyvPtr++ = (uchar)u;
+					*yuyvPtr++ = (uchar)y2;
+					*yuyvPtr++ = (uchar)v;
+					
+					has_prev_pixel = false;
+				}
 				//###############################
 
 				//픽셀별 rawTemperature 데이터 출력 메서드 (단위 centiKelvin)
 				//printRawThermalData(column,row,valueFrameBuffer); 
 				
 			}
+		}
+		
+		// 홀수 픽셀 처리 (마지막 픽셀이 홀수인 경우)
+		if (has_prev_pixel) {
+			// 마지막 픽셀을 복제하여 처리
+			int y1 = ((77 * prev_r + 150 * prev_g + 29 * prev_b) >> 8);
+			int y2 = y1; // 같은 픽셀 복제
+			int u = ((-43 * prev_r - 85 * prev_g + 128 * prev_b) >> 8) + 128;
+			int v = ((128 * prev_r - 107 * prev_g - 21 * prev_b) >> 8) + 128;
+			
+			y1 = (y1 < 0) ? 0 : (y1 > 255) ? 255 : y1;
+			y2 = (y2 < 0) ? 0 : (y2 > 255) ? 255 : y2;
+			u = (u < 0) ? 0 : (u > 255) ? 255 : u;
+			v = (v < 0) ? 0 : (v > 255) ? 255 : v;
+			
+			*yuyvPtr++ = (uchar)y1;
+			*yuyvPtr++ = (uchar)u;
+			*yuyvPtr++ = (uchar)y2;
+			*yuyvPtr++ = (uchar)v;
 		}
 		//각 프레임에 적용된 min, max, diff, scale 값 디버깅 ( min/max 미지정시 auto모드로 인해 매번 변함 )
 		//printf("minValue : %d , maxValue : %d , diff : %f , scale : %f\n", minValue, maxValue, diff, scale);
@@ -321,11 +373,10 @@ void LeptonThread::log_message(uint16_t level, std::string msg)
 
 void LeptonThread::updateVpipe()
 {
-	// QImage가 이미 Format_RGB888이므로 불필요한 변환 제거
-	// bits()를 직접 사용하여 메모리 복사 최소화
-	int imageSize = myImageWidth * myImageHeight * 3;
-	memcpy(vidsendbuf, myImage.bits(), imageSize);
-	write(v4l2sink, vidsendbuf, imageSize);
+	// QImage 제거: run()에서 이미 YUYV422로 변환 완료
+	// 버퍼를 직접 v4l2에 출력
+	int yuyvSize = myImageWidth * myImageHeight * 2; // YUYV422는 2 bytes/pixel
+	write(v4l2sink, vidsendbuf, yuyvSize);
 }
 
 void LeptonThread::open_vpipe() {
@@ -343,8 +394,10 @@ void LeptonThread::open_vpipe() {
     v.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
     v.fmt.pix.width = 160;
     v.fmt.pix.height = 120;
-    v.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB24;
-    vidsendsiz = 320 * 240 * 3;
+    v.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV; // YUYV422 포맷으로 변경
+    // YUYV422는 2 bytes per pixel (160 * 120 * 2 = 38,400 bytes)
+    // 기존 RGB24는 3 bytes per pixel이었음 (메모리 33% 절약)
+    vidsendsiz = 160 * 120 * 2;
     vidsendbuf = (uchar*)malloc(vidsendsiz);
 
     v.fmt.pix.sizeimage = vidsendsiz;
