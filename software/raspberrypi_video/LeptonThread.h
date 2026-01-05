@@ -6,7 +6,6 @@
 
 #include <QThread>
 #include <QtCore>
-#include <QImage>
 
 #define PACKET_SIZE 164
 #define PACKET_SIZE_UINT16 (PACKET_SIZE/2)
@@ -53,8 +52,7 @@ private:
   uint16_t rangeMax;
   int myImageWidth;
   int myImageHeight;
-  QImage myImage;
-  uchar*  vidsendbuf;
+  uchar*  vidsendbuf;  // YUYV422 버퍼 (QImage 제거, 직접 변환)
 
   uint8_t result[PACKET_SIZE*PACKETS_PER_FRAME];
   uint8_t shelf[4][PACKET_SIZE*PACKETS_PER_FRAME];
