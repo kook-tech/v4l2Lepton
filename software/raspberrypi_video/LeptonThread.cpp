@@ -8,6 +8,9 @@
 #include "Lepton_I2C.h"
 //
 #include <cmath>
+#include <chrono>
+#include <vector>
+#include <errno.h>
 #define PACKET_SIZE 164
 #define PACKET_SIZE_UINT16 (PACKET_SIZE/2)
 #define PACKETS_PER_FRAME 60
@@ -38,8 +41,10 @@ LeptonThread::LeptonThread() : QThread()
 	spiSpeed = 5 * 1000 * 1000; // SPI bus speed 20MHz -> 5MHz
 
 	// min/max value for scaling
-	autoRangeMin = true;
-	autoRangeMax = true;
+	// Default to FIXED scaling range (do not auto-change min/max at runtime).
+	// Auto-range can be enabled explicitly via LeptonThread::setAutomaticScalingRange().
+	autoRangeMin = false;
+	autoRangeMax = false;
 	rangeMin = 30000;
 	rangeMax = 32000;
 	open_vpipe();
@@ -68,7 +73,31 @@ LeptonThread::~LeptonThread() {
 }
 
 void LeptonThread::stop() {
+	// Make shutdown responsive:
+	// - flip flag so run() exits
+	// - wake any capture waiters
+	// - close FDs to unblock potential blocking I/O (SPI read, v4l2 write)
 	shouldStop = true;
+
+	// Unblock captureNextValidFrame waiters immediately.
+	capture_requested_.store(false, std::memory_order_relaxed);
+	{
+		QMutexLocker locker(&capture_mutex_);
+		capture_cv_.wakeAll();
+	}
+
+	// Close v4l2 sink to unblock write().
+	if (v4l2sink >= 0) {
+		::close(v4l2sink);
+		v4l2sink = -1;
+	}
+
+	// Close SPI fd to unblock read().
+	// NOTE: spi_cs0_fd is a global defined in SPI.cpp.
+	if (spi_cs0_fd >= 0) {
+		::close(spi_cs0_fd);
+		spi_cs0_fd = -1;
+	}
 }
 
 void LeptonThread::setLogLevel(uint16_t newLoglevel)
@@ -160,24 +189,73 @@ void LeptonThread::run()
 	//open spi port
 	SpiOpenPort(0, spiSpeed);
 
+	// Reusable work buffer for raw16 (centiKelvin) snapshot.
+	// We only commit this buffer to latest_raw_u16_ if the frame is valid.
+	std::vector<uint16_t> work_raw_u16;
+	work_raw_u16.resize(myImageWidth * myImageHeight);
+
 	while(!shouldStop) {
+		// Capture is on-demand: only build raw snapshot buffers when a capture is requested.
+		const bool capture_this_frame = capture_requested_.load(std::memory_order_relaxed);
+
+		// Ensure work buffer matches current dimensions (in case Lepton type changed).
+		if (capture_this_frame) {
+			const size_t expected_raw_size = static_cast<size_t>(myImageWidth) * static_cast<size_t>(myImageHeight);
+			if (work_raw_u16.size() != expected_raw_size) {
+				work_raw_u16.assign(expected_raw_size, 0);
+			}
+			// Clear for this frame to avoid leaking stale pixels if any unexpected index holes occur.
+			std::fill(work_raw_u16.begin(), work_raw_u16.end(), 0);
+		}
 
 		//read data packets from lepton over SPI
 		int resets = 0;
 		int segmentNumber = -1;
 		bool frameIncomplete = false;  // 프레임 불완전 플래그 (루프 시작 시 초기화)
 		for(int j=0;j<PACKETS_PER_FRAME;j++) {
+			if (shouldStop) {
+				frameIncomplete = true;
+				break;
+			}
 			//if it's a drop packet, reset j to 0, set to -1 so he'll be at 0 again loop
-			read(spi_cs0_fd, result+sizeof(uint8_t)*PACKET_SIZE*j, sizeof(uint8_t)*PACKET_SIZE);
+			const ssize_t nread = ::read(
+				spi_cs0_fd,
+				result + sizeof(uint8_t) * PACKET_SIZE * j,
+				sizeof(uint8_t) * PACKET_SIZE
+			);
+			if (nread != static_cast<ssize_t>(sizeof(uint8_t) * PACKET_SIZE)) {
+				if (shouldStop) {
+					frameIncomplete = true;
+					break;
+				}
+				// SPI hiccup or fd closed/reopened; try to resync.
+				j = -1;
+				resets += 1;
+				usleep(2000);
+				continue;
+			}
 			int packetNumber = result[j*PACKET_SIZE+1];
 			if(packetNumber != j) {
 				j = -1;
 				resets += 1;
-				usleep(2000);  // 패킷 드롭 시 대기 시간 증가 (1ms -> 2ms)
+				// 적응형 대기 시간: 드롭이 적으면 짧게, 많으면 길게
+				// resets < 10: 1ms (빠른 복구 시도)
+				// resets < 30: 2ms (안정성 우선)
+				// resets >= 30: 3ms (심각한 동기화 문제)
+				int waitTime = (resets < 10) ? 1000 : (resets < 30) ? 2000 : 3000;
+				usleep(waitTime);
 				//Note: we've selected 750 resets as an arbitrary limit, since there should never be 750 "null" packets between two valid transmissions at the current poll rate
 				//By polling faster, developers may easily exceed this count, and the down period between frames may then be flagged as a loss of sync
 				if(resets == 750) {
-					SpiClosePort(0);
+					// Close/reopen SPI (avoid SpiClosePort() because it exits on error).
+					if (spi_cs0_fd >= 0) {
+						::close(spi_cs0_fd);
+						spi_cs0_fd = -1;
+					}
+					if (shouldStop) {
+						frameIncomplete = true;
+						break;
+					}
 					lepton_reboot();
 					n_wrong_segment = 0;
 					n_zero_value_drop_frame = 0;
@@ -193,6 +271,9 @@ void LeptonThread::run()
 					break;
 				}
 			}
+		}
+		if (shouldStop) {
+			break;
 		}
 		if(resets >= 30) {
 			log_message(3, "done reading, resets: " + std::to_string(resets));
@@ -235,7 +316,8 @@ void LeptonThread::run()
 
 		if ((autoRangeMin == true) || (autoRangeMax == true)) {
 			if (autoRangeMin == true) {
-				maxValue = 65535;
+				// Initialize minValue high so we can find the true frame minimum.
+				minValue = 65535;
 			}
 			if (autoRangeMax == true) {
 				maxValue = 0;
@@ -262,7 +344,12 @@ void LeptonThread::run()
 				}
 			}
 			diff = maxValue - minValue;
-			scale = 3000/diff;
+			// Guard against divide-by-zero (e.g., flat frame or min/max not updated)
+			if (diff > 0.0f) {
+				scale = 3000 / diff;
+			} else {
+				scale = 1.0f;
+			}
 		}
 
 		// QImage 제거: 컬러맵에서 RGB를 가져와 바로 YUYV422로 변환
@@ -271,7 +358,7 @@ void LeptonThread::run()
 		has_prev_pixel = false;
 		frameValid = false;  // 프레임 유효성 초기화
 		
-		int row, column;
+		int row = 0, column = 0;
 		uint16_t value;
 		uint16_t valueFrameBuffer;
 		uint8_t r, g, b;
@@ -302,20 +389,30 @@ void LeptonThread::run()
 				// scale을 곱해서 min ~ max 범위에 대한 온도만 컬러맵에 매핑
 				value = (valueFrameBuffer-minValue)*scale;
 				
-				int ofs_r = 3 * value + 0; if (colormapSize <= ofs_r) ofs_r = colormapSize - 1;
-				int ofs_g = 3 * value + 1; if (colormapSize <= ofs_g) ofs_g = colormapSize - 1;
-				int ofs_b = 3 * value + 2; if (colormapSize <= ofs_b) ofs_b = colormapSize - 1;
+				// 컬러맵 인덱스 범위 체크 최적화 (std::min 사용)
+				int base_ofs = 3 * value;
+				int ofs_r = (base_ofs + 0 < colormapSize) ? base_ofs + 0 : colormapSize - 1;
+				int ofs_g = (base_ofs + 1 < colormapSize) ? base_ofs + 1 : colormapSize - 1;
+				int ofs_b = (base_ofs + 2 < colormapSize) ? base_ofs + 2 : colormapSize - 1;
 				r = colormap[ofs_r];
 				g = colormap[ofs_g];
 				b = colormap[ofs_b];
 				
-				if (typeLepton == 3) {
-					column = (i % PACKET_SIZE_UINT16) - 2 + (myImageWidth / 2) * ((i % (PACKET_SIZE_UINT16 * 2)) / PACKET_SIZE_UINT16);
-					row = i / PACKET_SIZE_UINT16 / 2 + ofsRow;
-				}
-				else {
-					column = (i % PACKET_SIZE_UINT16) - 2;
-					row = i / PACKET_SIZE_UINT16;
+				if (capture_this_frame) {
+					if (typeLepton == 3) {
+						column = (i % PACKET_SIZE_UINT16) - 2 + (myImageWidth / 2) * ((i % (PACKET_SIZE_UINT16 * 2)) / PACKET_SIZE_UINT16);
+						row = i / PACKET_SIZE_UINT16 / 2 + ofsRow;
+					}
+					else {
+						column = (i % PACKET_SIZE_UINT16) - 2;
+						row = i / PACKET_SIZE_UINT16;
+					}
+
+					// Cache raw16 (centiKelvin) into a stable 2D layout for snapshot saving.
+					// Bounds-check protects against any unexpected index math.
+					if (0 <= row && row < myImageHeight && 0 <= column && column < myImageWidth) {
+						work_raw_u16[static_cast<size_t>(row) * static_cast<size_t>(myImageWidth) + static_cast<size_t>(column)] = valueFrameBuffer;
+					}
 				}
 				
 				// RGB → YUYV422 직접 변환 (2 pixels per 4 bytes)
@@ -338,7 +435,8 @@ void LeptonThread::run()
 					int u = ((-43 * r_avg - 85 * g_avg + 128 * b_avg) >> 8) + 128;
 					int v = ((128 * r_avg - 107 * g_avg - 21 * b_avg) >> 8) + 128;
 					
-					// 클램핑 (0-255)
+					// 클램핑 (0-255) - 컴파일러 최적화 활용
+					// O3 최적화에서 삼항 연산자가 효율적으로 처리됨
 					y1 = (y1 < 0) ? 0 : (y1 > 255) ? 255 : y1;
 					y2 = (y2 < 0) ? 0 : (y2 > 255) ? 255 : y2;
 					u = (u < 0) ? 0 : (u > 255) ? 255 : u;
@@ -403,16 +501,175 @@ void LeptonThread::run()
 			frameValid = true;
 		}
 
+		// Update lightweight per-frame status for diagnostics (no buffers copied).
+		{
+			const uint64_t now_ms =
+			    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+			                              std::chrono::system_clock::now().time_since_epoch())
+			                              .count());
+			QMutexLocker locker(&frame_stats_mutex_);
+			last_frame_ts_ms_ = now_ms;
+			last_frame_valid_ = frameValid;
+			last_frame_incomplete_ = frameIncomplete || (pixelsProcessed < expectedPixels * 0.9);
+			last_pixels_processed_ = pixelsProcessed;
+			last_expected_pixels_ = expectedPixels;
+			last_spi_resets_ = resets;
+			last_segment_number_ = segmentNumber;
+			last_wrong_segment_streak_ = static_cast<int>(n_wrong_segment);
+			last_zero_value_drop_streak_ = static_cast<int>(n_zero_value_drop_frame);
+		}
+
 		if (n_zero_value_drop_frame != 0) {
 			log_message(8, "[WARNING] Found zero-value. Drop the frame continuously " + std::to_string(n_zero_value_drop_frame) + " times [RECOVERED]");
 			n_zero_value_drop_frame = 0;
 		}
 
+		// On-demand snapshot: if a capture is requested, commit one valid frame and wake waiters.
+		if (capture_this_frame && frameValid) {
+			const uint64_t now_ms =
+			    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+			                              std::chrono::system_clock::now().time_since_epoch())
+			                              .count());
+
+			{
+				QMutexLocker locker(&latest_mutex_);
+				latest_ts_ms_ = now_ms;
+				latest_valid_ = frameValid;
+				latest_range_min_ck_ = minValue;
+				latest_range_max_ck_ = maxValue;
+				latest_scale_ = scale;
+
+				const size_t yuyv_size = static_cast<size_t>(myImageWidth) * static_cast<size_t>(myImageHeight) * 2;
+				if (latest_yuyv_.size() != yuyv_size) {
+					latest_yuyv_.resize(yuyv_size);
+				}
+				memcpy(latest_yuyv_.data(), vidsendbuf, yuyv_size);
+				latest_raw_u16_ = work_raw_u16;  // copy only when capturing
+			}
+
+			{
+				QMutexLocker locker(&capture_mutex_);
+				capture_seq_++;
+				capture_requested_.store(false, std::memory_order_relaxed);
+				capture_cv_.wakeAll();
+			}
+		}
+
 		updateVpipe();
 	}
 	
-	//finally, close SPI port just bcuz
-	SpiClosePort(0);
+	// finally, close SPI port (avoid SpiClosePort() because it exits on error)
+	if (spi_cs0_fd >= 0) {
+		::close(spi_cs0_fd);
+		spi_cs0_fd = -1;
+	}
+}
+
+bool LeptonThread::snapshotLatestFrame(
+    std::vector<uint16_t>& out_raw_u16,
+    std::vector<uint8_t>& out_yuyv,
+    int& out_width,
+    int& out_height,
+    uint64_t& out_frame_ts_ms,
+    bool& out_frame_valid,
+    uint16_t& out_range_min_ck,
+    uint16_t& out_range_max_ck,
+    float& out_scale,
+    int& out_type_colormap,
+    int& out_type_lepton) const
+{
+	QMutexLocker locker(&latest_mutex_);
+	if (latest_ts_ms_ == 0 || latest_yuyv_.empty()) {
+		return false;
+	}
+
+	out_width = myImageWidth;
+	out_height = myImageHeight;
+	out_frame_ts_ms = latest_ts_ms_;
+	out_frame_valid = latest_valid_;
+	out_range_min_ck = latest_range_min_ck_;
+	out_range_max_ck = latest_range_max_ck_;
+	out_scale = latest_scale_;
+	out_type_colormap = typeColormap;
+	out_type_lepton = typeLepton;
+
+	out_yuyv = latest_yuyv_;
+	out_raw_u16 = latest_raw_u16_;
+	return true;
+}
+
+bool LeptonThread::getLastFrameStatus(
+    uint64_t& out_ts_ms,
+    bool& out_valid,
+    bool& out_frame_incomplete,
+    int& out_pixels_processed,
+    int& out_expected_pixels,
+    int& out_spi_resets,
+    int& out_segment_number,
+    int& out_wrong_segment_streak,
+    int& out_zero_value_drop_streak) const
+{
+	QMutexLocker locker(&frame_stats_mutex_);
+	if (last_frame_ts_ms_ == 0) {
+		return false;
+	}
+	out_ts_ms = last_frame_ts_ms_;
+	out_valid = last_frame_valid_;
+	out_frame_incomplete = last_frame_incomplete_;
+	out_pixels_processed = last_pixels_processed_;
+	out_expected_pixels = last_expected_pixels_;
+	out_spi_resets = last_spi_resets_;
+	out_segment_number = last_segment_number_;
+	out_wrong_segment_streak = last_wrong_segment_streak_;
+	out_zero_value_drop_streak = last_zero_value_drop_streak_;
+	return true;
+}
+
+bool LeptonThread::captureNextValidFrame(
+    std::vector<uint16_t>& out_raw_u16,
+    std::vector<uint8_t>& out_yuyv,
+    int& out_width,
+    int& out_height,
+    uint64_t& out_frame_ts_ms,
+    bool& out_frame_valid,
+    uint16_t& out_range_min_ck,
+    uint16_t& out_range_max_ck,
+    float& out_scale,
+    int& out_type_colormap,
+    int& out_type_lepton,
+    int timeout_ms)
+{
+	// Request capture
+	uint64_t start_seq = 0;
+	{
+		QMutexLocker locker(&capture_mutex_);
+		start_seq = capture_seq_;
+		capture_requested_.store(true, std::memory_order_relaxed);
+	}
+
+	// Wait for a new capture
+	{
+		QMutexLocker locker(&capture_mutex_);
+		while (capture_seq_ == start_seq) {
+			if (shouldStop) return false;
+			if (!capture_cv_.wait(&capture_mutex_, timeout_ms)) {
+				return false;
+			}
+		}
+	}
+
+	return snapshotLatestFrame(
+	    out_raw_u16,
+	    out_yuyv,
+	    out_width,
+	    out_height,
+	    out_frame_ts_ms,
+	    out_frame_valid,
+	    out_range_min_ck,
+	    out_range_max_ck,
+	    out_scale,
+	    out_type_colormap,
+	    out_type_lepton);
 }
 
 void LeptonThread::performFFC() {
@@ -439,14 +696,24 @@ void LeptonThread::updateVpipe()
 {
 	// QImage 제거: run()에서 이미 YUYV422로 변환 완료
 	// 버퍼를 직접 v4l2에 출력
+	if (v4l2sink < 0 || vidsendbuf == nullptr) {
+		return;
+	}
 	int yuyvSize = myImageWidth * myImageHeight * 2; // YUYV422는 2 bytes/pixel
-	write(v4l2sink, vidsendbuf, yuyvSize);
+	const ssize_t n = ::write(v4l2sink, vidsendbuf, yuyvSize);
+	if (n < 0) {
+		// Best-effort; on shutdown or when no consumer is ready, v4l2loopback may return EAGAIN/EPIPE.
+		if (errno == EAGAIN || errno == EPIPE || errno == EBADF) {
+			return;
+		}
+	}
 }
 
 void LeptonThread::open_vpipe() {
     int vidsendsiz;
 
-    v4l2sink = open("/dev/video12", O_WRONLY);
+    // Non-blocking helps avoid shutdown hangs in write() when downstream isn't consuming.
+    v4l2sink = open("/dev/video12", O_WRONLY | O_NONBLOCK);
     if (v4l2sink < 0) {
         fprintf(stderr, "Failed to open v4l2sink device. (%s)\n", strerror(errno));
         exit(-2);

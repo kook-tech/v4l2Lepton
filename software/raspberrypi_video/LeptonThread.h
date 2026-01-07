@@ -3,9 +3,13 @@
 
 #include <ctime>
 #include <stdint.h>
+#include <atomic>
+#include <vector>
 
 #include <QThread>
 #include <QtCore>
+#include <QMutex>
+#include <QWaitCondition>
 
 #define PACKET_SIZE 164
 #define PACKET_SIZE_UINT16 (PACKET_SIZE/2)
@@ -32,6 +36,50 @@ public:
   void updateVpipe();
   void open_vpipe();
   void printRawThermalData(int, int, uint16_t);
+
+  // On-demand capture: request the next valid frame snapshot and wait for it.
+  // This avoids per-frame memcpy overhead and only snapshots when requested (e.g., via MQTT capture_now).
+  bool captureNextValidFrame(
+      std::vector<uint16_t>& out_raw_u16,
+      std::vector<uint8_t>& out_yuyv,
+      int& out_width,
+      int& out_height,
+      uint64_t& out_frame_ts_ms,
+      bool& out_frame_valid,
+      uint16_t& out_range_min_ck,
+      uint16_t& out_range_max_ck,
+      float& out_scale,
+      int& out_type_colormap,
+      int& out_type_lepton,
+      int timeout_ms = 2000);
+
+  // Thread-safe snapshot of the last captured frame (raw16 + YUYV stream buffer).
+  // Returns false if no capture has been performed yet.
+  bool snapshotLatestFrame(
+      std::vector<uint16_t>& out_raw_u16,
+      std::vector<uint8_t>& out_yuyv,
+      int& out_width,
+      int& out_height,
+      uint64_t& out_frame_ts_ms,
+      bool& out_frame_valid,
+      uint16_t& out_range_min_ck,
+      uint16_t& out_range_max_ck,
+      float& out_scale,
+      int& out_type_colormap,
+      int& out_type_lepton) const;
+
+  // Lightweight per-frame status (updated on every frame; safe to query from other threads).
+  // Useful for diagnosing capture_timeout without affecting the hot streaming path.
+  bool getLastFrameStatus(
+      uint64_t& out_ts_ms,
+      bool& out_valid,
+      bool& out_frame_incomplete,
+      int& out_pixels_processed,
+      int& out_expected_pixels,
+      int& out_spi_resets,
+      int& out_segment_number,
+      int& out_wrong_segment_streak,
+      int& out_zero_value_drop_streak) const;
 public slots:
   void performFFC();
 
@@ -62,6 +110,34 @@ private:
   int v4l2sink;
   bool shouldStop;  // 종료 플래그
   bool frameValid;  // 현재 프레임이 유효한지
+
+  // Latest frame cache (for capture snapshot)
+  mutable QMutex latest_mutex_;
+  std::vector<uint16_t> latest_raw_u16_;
+  std::vector<uint8_t> latest_yuyv_;
+  uint64_t latest_ts_ms_ = 0;
+  bool latest_valid_ = false;
+  uint16_t latest_range_min_ck_ = 0;
+  uint16_t latest_range_max_ck_ = 0;
+  float latest_scale_ = 0.0f;
+
+  // On-demand capture synchronization
+  std::atomic<bool> capture_requested_{false};
+  mutable QMutex capture_mutex_;
+  QWaitCondition capture_cv_;
+  uint64_t capture_seq_ = 0;
+
+  // Per-frame diagnostics (no frame buffers; just counters/flags)
+  mutable QMutex frame_stats_mutex_;
+  uint64_t last_frame_ts_ms_ = 0;
+  bool last_frame_valid_ = false;
+  bool last_frame_incomplete_ = false;
+  int last_pixels_processed_ = 0;
+  int last_expected_pixels_ = 0;
+  int last_spi_resets_ = 0;
+  int last_segment_number_ = -1;
+  int last_wrong_segment_streak_ = 0;
+  int last_zero_value_drop_streak_ = 0;
 
 };
 
