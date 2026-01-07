@@ -16,6 +16,10 @@ sdkclean.commands = make -C $${RPI_LIBS}/$${LEPTONSDK} clean
 DEPENDPATH += .
 INCLUDEPATH += . $${RPI_LIBS}
 
+# 컴파일러 최적화 옵션
+QMAKE_CXXFLAGS += -O3 -march=native -mtune=native
+QMAKE_CFLAGS += -O3 -march=native -mtune=native
+
 DESTDIR=.
 OBJECTS_DIR=gen_objs
 MOC_DIR=gen_mocs

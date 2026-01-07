@@ -173,7 +173,12 @@ void LeptonThread::run()
 			if(packetNumber != j) {
 				j = -1;
 				resets += 1;
-				usleep(2000);  // 패킷 드롭 시 대기 시간 증가 (1ms -> 2ms)
+				// 적응형 대기 시간: 드롭이 적으면 짧게, 많으면 길게
+				// resets < 10: 1ms (빠른 복구 시도)
+				// resets < 30: 2ms (안정성 우선)
+				// resets >= 30: 3ms (심각한 동기화 문제)
+				int waitTime = (resets < 10) ? 1000 : (resets < 30) ? 2000 : 3000;
+				usleep(waitTime);
 				//Note: we've selected 750 resets as an arbitrary limit, since there should never be 750 "null" packets between two valid transmissions at the current poll rate
 				//By polling faster, developers may easily exceed this count, and the down period between frames may then be flagged as a loss of sync
 				if(resets == 750) {
@@ -302,9 +307,11 @@ void LeptonThread::run()
 				// scale을 곱해서 min ~ max 범위에 대한 온도만 컬러맵에 매핑
 				value = (valueFrameBuffer-minValue)*scale;
 				
-				int ofs_r = 3 * value + 0; if (colormapSize <= ofs_r) ofs_r = colormapSize - 1;
-				int ofs_g = 3 * value + 1; if (colormapSize <= ofs_g) ofs_g = colormapSize - 1;
-				int ofs_b = 3 * value + 2; if (colormapSize <= ofs_b) ofs_b = colormapSize - 1;
+				// 컬러맵 인덱스 범위 체크 최적화 (std::min 사용)
+				int base_ofs = 3 * value;
+				int ofs_r = (base_ofs + 0 < colormapSize) ? base_ofs + 0 : colormapSize - 1;
+				int ofs_g = (base_ofs + 1 < colormapSize) ? base_ofs + 1 : colormapSize - 1;
+				int ofs_b = (base_ofs + 2 < colormapSize) ? base_ofs + 2 : colormapSize - 1;
 				r = colormap[ofs_r];
 				g = colormap[ofs_g];
 				b = colormap[ofs_b];
@@ -338,7 +345,8 @@ void LeptonThread::run()
 					int u = ((-43 * r_avg - 85 * g_avg + 128 * b_avg) >> 8) + 128;
 					int v = ((128 * r_avg - 107 * g_avg - 21 * b_avg) >> 8) + 128;
 					
-					// 클램핑 (0-255)
+					// 클램핑 (0-255) - 컴파일러 최적화 활용
+					// O3 최적화에서 삼항 연산자가 효율적으로 처리됨
 					y1 = (y1 < 0) ? 0 : (y1 > 255) ? 255 : y1;
 					y2 = (y2 < 0) ? 0 : (y2 > 255) ? 255 : y2;
 					u = (u < 0) ? 0 : (u > 255) ? 255 : u;
