@@ -20,7 +20,9 @@ LeptonThread::LeptonThread() : QThread()
 	loglevel = 0;
 	shouldStop = false;  // 종료 플래그 초기화
 	vidsendbuf = nullptr;  // 버퍼 초기화
+	prev_vidsendbuf = nullptr;  // 이전 프레임 버퍼 초기화
 	v4l2sink = -1;  // 파일 디스크립터 초기화
+	frameValid = false;  // 프레임 유효성 플래그 초기화
 
 	//
 	typeColormap = 3; // 1:colormap_rainbow  /  2:colormap_grayscale  /  3:colormap_ironblack(default)
@@ -54,6 +56,10 @@ LeptonThread::~LeptonThread() {
 	if (vidsendbuf) {
 		free(vidsendbuf);
 		vidsendbuf = nullptr;
+	}
+	if (prev_vidsendbuf) {
+		free(prev_vidsendbuf);
+		prev_vidsendbuf = nullptr;
 	}
 	if (v4l2sink >= 0) {
 		close(v4l2sink);
@@ -159,6 +165,7 @@ void LeptonThread::run()
 		//read data packets from lepton over SPI
 		int resets = 0;
 		int segmentNumber = -1;
+		bool frameIncomplete = false;  // 프레임 불완전 플래그 (루프 시작 시 초기화)
 		for(int j=0;j<PACKETS_PER_FRAME;j++) {
 			//if it's a drop packet, reset j to 0, set to -1 so he'll be at 0 again loop
 			read(spi_cs0_fd, result+sizeof(uint8_t)*PACKET_SIZE*j, sizeof(uint8_t)*PACKET_SIZE);
@@ -166,7 +173,7 @@ void LeptonThread::run()
 			if(packetNumber != j) {
 				j = -1;
 				resets += 1;
-				usleep(1000);
+				usleep(2000);  // 패킷 드롭 시 대기 시간 증가 (1ms -> 2ms)
 				//Note: we've selected 750 resets as an arbitrary limit, since there should never be 750 "null" packets between two valid transmissions at the current poll rate
 				//By polling faster, developers may easily exceed this count, and the down period between frames may then be flagged as a loss of sync
 				if(resets == 750) {
@@ -199,6 +206,14 @@ void LeptonThread::run()
 				if ((n_wrong_segment % 12) == 0) {
 					log_message(5, "[WARNING] Got wrong segment number continuously " + std::to_string(n_wrong_segment) + " times");
 				}
+				frameIncomplete = true;  // 잘못된 세그먼트로 인한 프레임 불완전
+				// 이전 프레임 재사용하고 다음 프레임으로
+				if (prev_vidsendbuf != nullptr) {
+					memcpy(vidsendbuf, prev_vidsendbuf, myImageWidth * myImageHeight * 2);
+				} else {
+					memset(vidsendbuf, 0, myImageWidth * myImageHeight * 2);
+				}
+				updateVpipe();
 				continue;
 			}
 			if (n_wrong_segment != 0) {
@@ -254,11 +269,13 @@ void LeptonThread::run()
 		// YUYV422는 2 pixels per 4 bytes (Y0 U Y1 V)
 		uchar* yuyvPtr = vidsendbuf;
 		has_prev_pixel = false;
+		frameValid = false;  // 프레임 유효성 초기화
 		
 		int row, column;
 		uint16_t value;
 		uint16_t valueFrameBuffer;
 		uint8_t r, g, b;
+		int pixelsProcessed = 0;  // 처리된 픽셀 수 추적
 		for(int iSegment = iSegmentStart; iSegment <= iSegmentStop; iSegment++) {
 			int ofsRow = 30 * (iSegment - 1);
 			for(int i=0;i<FRAME_SIZE_UINT16;i++) {
@@ -275,8 +292,11 @@ void LeptonThread::run()
 					if ((n_zero_value_drop_frame % 12) == 0) {
 						log_message(5, "[WARNING] Found zero-value. Drop the frame continuously " + std::to_string(n_zero_value_drop_frame) + " times");
 					}
+					// 제로 값을 만나면 프레임 불완전으로 표시하고 중단
+					frameIncomplete = true;
 					break;
 				}
+				pixelsProcessed++;
 				//##############################
 				//온도 데이터인 valueFrameBuffer를 가지고 컬러팔레트에 매핑을 하는 부분입니다.
 				// scale을 곱해서 min ~ max 범위에 대한 온도만 컬러맵에 매핑
@@ -360,6 +380,28 @@ void LeptonThread::run()
 		}
 		//각 프레임에 적용된 min, max, diff, scale 값 디버깅 ( min/max 미지정시 auto모드로 인해 매번 변함 )
 		//printf("minValue : %d , maxValue : %d , diff : %f , scale : %f\n", minValue, maxValue, diff, scale);
+
+		// 프레임 완전성 검증: 예상 픽셀 수와 실제 처리된 픽셀 수 비교
+		int expectedPixels = myImageWidth * myImageHeight;
+		if (frameIncomplete || pixelsProcessed < expectedPixels * 0.9) {  // 90% 미만이면 프레임 불완전
+			if (prev_vidsendbuf != nullptr) {
+				// 이전 프레임 재사용
+				memcpy(vidsendbuf, prev_vidsendbuf, myImageWidth * myImageHeight * 2);
+				log_message(3, "[WARNING] Incomplete frame (" + std::to_string(pixelsProcessed) + "/" + std::to_string(expectedPixels) + " pixels), reusing previous frame");
+			} else {
+				// 첫 프레임이거나 이전 프레임이 없으면 버퍼를 검은색으로 초기화
+				memset(vidsendbuf, 0, myImageWidth * myImageHeight * 2);
+				log_message(3, "[WARNING] Incomplete frame, no previous frame available");
+			}
+		} else {
+			// 유효한 프레임이면 이전 프레임 버퍼에 복사
+			if (prev_vidsendbuf == nullptr) {
+				// 첫 유효 프레임이면 이전 프레임 버퍼 할당
+				prev_vidsendbuf = (uchar*)malloc(myImageWidth * myImageHeight * 2);
+			}
+			memcpy(prev_vidsendbuf, vidsendbuf, myImageWidth * myImageHeight * 2);
+			frameValid = true;
+		}
 
 		if (n_zero_value_drop_frame != 0) {
 			log_message(8, "[WARNING] Found zero-value. Drop the frame continuously " + std::to_string(n_zero_value_drop_frame) + " times [RECOVERED]");

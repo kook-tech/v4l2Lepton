@@ -54,12 +54,14 @@ private:
   int myImageWidth;
   int myImageHeight;
   uchar*  vidsendbuf;  // YUYV422 버퍼 (QImage 제거, 직접 변환)
+  uchar*  prev_vidsendbuf;  // 이전 프레임 버퍼 (프레임 드롭 시 재사용)
 
   uint8_t result[PACKET_SIZE*PACKETS_PER_FRAME];
   uint8_t shelf[4][PACKET_SIZE*PACKETS_PER_FRAME];
   uint16_t *frameBuffer;
   int v4l2sink;
   bool shouldStop;  // 종료 플래그
+  bool frameValid;  // 현재 프레임이 유효한지
 
 };
 
