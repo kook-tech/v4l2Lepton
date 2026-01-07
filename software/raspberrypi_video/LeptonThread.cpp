@@ -18,6 +18,9 @@ LeptonThread::LeptonThread() : QThread()
 {
 	//
 	loglevel = 0;
+	shouldStop = false;  // 종료 플래그 초기화
+	vidsendbuf = nullptr;  // 버퍼 초기화
+	v4l2sink = -1;  // 파일 디스크립터 초기화
 
 	//
 	typeColormap = 3; // 1:colormap_rainbow  /  2:colormap_grayscale  /  3:colormap_ironblack(default)
@@ -41,6 +44,25 @@ LeptonThread::LeptonThread() : QThread()
 }
 
 LeptonThread::~LeptonThread() {
+	stop();  // 종료 요청
+	wait(5000);  // 최대 5초 대기
+	if (isRunning()) {
+		terminate();  // 강제 종료
+		wait(1000);
+	}
+	// 리소스 정리
+	if (vidsendbuf) {
+		free(vidsendbuf);
+		vidsendbuf = nullptr;
+	}
+	if (v4l2sink >= 0) {
+		close(v4l2sink);
+		v4l2sink = -1;
+	}
+}
+
+void LeptonThread::stop() {
+	shouldStop = true;
 }
 
 void LeptonThread::setLogLevel(uint16_t newLoglevel)
@@ -132,7 +154,7 @@ void LeptonThread::run()
 	//open spi port
 	SpiOpenPort(0, spiSpeed);
 
-	while(true) {
+	while(!shouldStop) {
 
 		//read data packets from lepton over SPI
 		int resets = 0;

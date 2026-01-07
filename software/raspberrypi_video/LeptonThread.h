@@ -28,6 +28,7 @@ public:
   void useRangeMinValue(uint16_t);
   void useRangeMaxValue(uint16_t);
   void run();
+  void stop();  // 종료 요청
   void updateVpipe();
   void open_vpipe();
   void printRawThermalData(int, int, uint16_t);
@@ -58,6 +59,7 @@ private:
   uint8_t shelf[4][PACKET_SIZE*PACKETS_PER_FRAME];
   uint16_t *frameBuffer;
   int v4l2sink;
+  bool shouldStop;  // 종료 플래그
 
 };
 

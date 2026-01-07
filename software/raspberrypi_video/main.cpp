@@ -1,8 +1,20 @@
 #include <iostream>
 #include <cstring>
 #include <unistd.h>
+#include <signal.h>
+#include <atomic>
+#include <libgen.h>  // basename() 사용
 #include "Palettes.h"
 #include "LeptonThread.h"
+
+// 전역 종료 플래그
+static std::atomic<bool> g_shutdown_requested{false};
+
+// 시그널 핸들러
+void signalHandler(int signal) {
+	std::cerr << "\n[raspberrypi_video] 시그널 " << signal << " 수신, 종료 요청..." << std::endl;
+	g_shutdown_requested = true;
+}
 
 void printUsage(char *cmd) {
     char *cmdname = basename(cmd);
@@ -123,13 +135,31 @@ int main(int argc, char **argv) {
     if (rangeMax >= 0) thread->useRangeMaxValue(rangeMax);
     
     
+    // 시그널 핸들러 등록
+    signal(SIGTERM, signalHandler);
+    signal(SIGINT, signalHandler);
+    
     thread->start();
 
-    
-    while (true) {
-        usleep(100000);  
+    // 종료 신호 대기
+    while (!g_shutdown_requested) {
+        usleep(100000);  // 100ms 대기
     }
-
+    
+    // 정리 작업
+    std::cerr << "[raspberrypi_video] 종료 중..." << std::endl;
+    thread->stop();
+    thread->wait(5000);  // 최대 5초 대기
+    
+    if (thread->isRunning()) {
+        std::cerr << "[raspberrypi_video] 스레드가 응답하지 않아 강제 종료합니다." << std::endl;
+        thread->terminate();
+        thread->wait(1000);
+    }
+    
+    delete thread;
+    std::cerr << "[raspberrypi_video] 정상 종료 완료" << std::endl;
+    
     return 0;
 }
 
