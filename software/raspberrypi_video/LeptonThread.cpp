@@ -194,6 +194,13 @@ void LeptonThread::run()
 	std::vector<uint16_t> work_raw_u16;
 	work_raw_u16.resize(myImageWidth * myImageHeight);
 
+	// Lepton 3: track which segment numbers (1-4) we've seen valid from packet 20 this frame (any order)
+	bool segmentIdSeen[4] = { false, false, false, false };
+	// When segment byte is corrupted and we can't infer yet: hold block and confirm at end of frame
+	std::vector<uint8_t> pendingSegmentBuf;
+	pendingSegmentBuf.resize(PACKET_SIZE * PACKETS_PER_FRAME);
+	bool hasPendingSegment = false;
+
 	while(!shouldStop) {
 		// Capture is on-demand: only build raw snapshot buffers when a capture is requested.
 		const bool capture_this_frame = capture_requested_.load(std::memory_order_relaxed);
@@ -259,6 +266,8 @@ void LeptonThread::run()
 					lepton_reboot();
 					n_wrong_segment = 0;
 					n_zero_value_drop_frame = 0;
+					for (int i = 0; i < 4; i++) segmentIdSeen[i] = false;
+					hasPendingSegment = false;
 					usleep(750000);
 					SpiOpenPort(0, spiSpeed);
 				}
@@ -266,9 +275,28 @@ void LeptonThread::run()
 			}
 			if ((typeLepton == 3) && (packetNumber == 20)) {
 				segmentNumber = (result[j*PACKET_SIZE] >> 4) & 0x0f;
-				if ((segmentNumber < 1) || (4 < segmentNumber)) {
-					log_message(10, "[ERROR] Wrong segment number " + std::to_string(segmentNumber));
-					break;
+				if ((segmentNumber >= 1) && (segmentNumber <= 4)) {
+					segmentIdSeen[segmentNumber - 1] = true;
+				} else {
+					// Corrupted: if exactly one of 1,2,3,4 not yet seen, infer now; else hold and confirm at end of frame
+					int missingCount = 0;
+					int missingSegment = 0;
+					for (int s = 1; s <= 4; s++) {
+						if (!segmentIdSeen[s - 1]) {
+							missingCount++;
+							missingSegment = s;
+						}
+					}
+					if (missingCount == 1) {
+						segmentNumber = missingSegment;
+						segmentIdSeen[segmentNumber - 1] = true;
+						log_message(10, "[WARNING] Wrong segment byte, inferred segment " + std::to_string(segmentNumber) + " from other three");
+					} else {
+						// Can't infer yet: save to pending, confirm when we have the other three
+						memcpy(pendingSegmentBuf.data(), result, sizeof(uint8_t) * PACKET_SIZE * PACKETS_PER_FRAME);
+						hasPendingSegment = true;
+						segmentNumber = -1;
+					}
 				}
 			}
 		}
@@ -283,6 +311,10 @@ void LeptonThread::run()
 		int iSegmentStop;
 		if (typeLepton == 3) {
 			if ((segmentNumber < 1) || (4 < segmentNumber)) {
+				if (hasPendingSegment) {
+					// Hold this block in pending; read next block and confirm at end of frame
+					continue;
+				}
 				n_wrong_segment++;
 				if ((n_wrong_segment % 12) == 0) {
 					log_message(5, "[WARNING] Got wrong segment number continuously " + std::to_string(n_wrong_segment) + " times");
@@ -306,6 +338,21 @@ void LeptonThread::run()
 			memcpy(shelf[segmentNumber - 1], result, sizeof(uint8_t) * PACKET_SIZE*PACKETS_PER_FRAME);
 			if (segmentNumber != 4) {
 				continue;
+			}
+			// End of frame: if we held a pending block (e.g. X,2,3,4), put it in the missing segment slot
+			if (hasPendingSegment) {
+				int missingSegment = 0;
+				for (int i = 0; i < 4; i++) {
+					if (!segmentIdSeen[i]) {
+						missingSegment = i + 1;
+						break;
+					}
+				}
+				if (missingSegment >= 1 && missingSegment <= 4) {
+					memcpy(shelf[missingSegment - 1], pendingSegmentBuf.data(), sizeof(uint8_t) * PACKET_SIZE * PACKETS_PER_FRAME);
+					log_message(10, "[WARNING] Pending block confirmed as segment " + std::to_string(missingSegment) + " from other three");
+				}
+				hasPendingSegment = false;
 			}
 			iSegmentStop = 4;
 		}
@@ -556,6 +603,12 @@ void LeptonThread::run()
 		}
 
 		updateVpipe();
+
+		// Lepton 3: next frame starts with no segment IDs seen and no pending block
+		if (typeLepton == 3 && segmentNumber == 4) {
+			for (int i = 0; i < 4; i++) segmentIdSeen[i] = false;
+			hasPendingSegment = false;
+		}
 	}
 	
 	// finally, close SPI port (avoid SpiClosePort() because it exits on error)
