@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <atomic>
 #include <vector>
+#include <string>
 
 #include <QThread>
 #include <QtCore>
@@ -28,6 +29,7 @@ public:
   void useColormap(int);
   void useLepton(int);
   void useSpiSpeedMhz(unsigned int);
+  void useV4l2Input(const char* device);  // pure_thermal 등 V4L2 장치를 Y16 모드로 캡처
   void setAutomaticScalingRange();
   void useRangeMinValue(uint16_t);
   void useRangeMaxValue(uint16_t);
@@ -108,6 +110,17 @@ private:
   uint8_t shelf[4][PACKET_SIZE*PACKETS_PER_FRAME];
   uint16_t *frameBuffer;
   int v4l2sink;
+  static const int V4L2_NBUF = 2;
+  void* v4l2_bufs_[V4L2_NBUF];
+  size_t v4l2_buf_len_;
+  int v4l2_queued_;
+  bool use_v4l2_input_;      // true: pure_thermal(V4L2) 캡처, false: SPI 직접 연결
+  std::string v4l2_device_;  // V4L2 캡처 장치 경로 (예: /dev/video0)
+  int v4l2src_fd_;          // V4L2 캡처용 fd
+  static const int V4L2_SRC_NBUF = 4;
+  void* v4l2src_bufs_[V4L2_SRC_NBUF];  // mmap 캡처 버퍼 (read() 미지원 드라이버용)
+  size_t v4l2src_buf_len_;
+  int v4l2src_nbuf_;        // 실제 할당된 캡처 버퍼 수
   bool shouldStop;  // 종료 플래그
   bool frameValid;  // 현재 프레임이 유효한지
 

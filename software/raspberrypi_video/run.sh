@@ -10,6 +10,10 @@
 # Lepton type: 2 for Lepton 2.x, 3 for Lepton 3.x/3.5
 LEPTON_TYPE=3
 
+# V4L2 capture device for pure_thermal (empty = use SPI)
+# When set, captures Y16 from device (e.g. /dev/video0) instead of SPI
+V4L2_DEVICE=""
+
 # SPI bus speed in MHz (10-30, default: 20)
 # Lower values are more stable but slower
 # Higher values are faster but may cause data loss
@@ -70,7 +74,11 @@ echo "============================================"
 echo "Lepton Video Capture Configuration"
 echo "============================================"
 echo "Lepton Type: $LEPTON_TYPE"
-echo "SPI Speed: ${SPI_SPEED}MHz"
+if [ -n "$V4L2_DEVICE" ]; then
+    echo "V4L2 Device: $V4L2_DEVICE (Y16 mode)"
+else
+    echo "SPI Speed: ${SPI_SPEED}MHz"
+fi
 echo "Temperature Range: ${TEMP_MIN}°C ~ ${TEMP_MAX}°C"
 echo "Signal Range: ${SIG_MIN}°C ~ ${SIG_MAX}°C"
 echo "Palette Version: $PALETTE_VERSION"
@@ -79,17 +87,16 @@ echo "Log Level: $LOG_LEVEL"
 echo "============================================"
 echo ""
 
+# Build arguments
+ARGS="-tl $LEPTON_TYPE -min $TEMP_MIN -max $TEMP_MAX -sigmin $SIG_MIN -sigmax $SIG_MAX -ver $PALETTE_VERSION -cm $COLORMAP -d $LOG_LEVEL"
+if [ -n "$V4L2_DEVICE" ]; then
+    ARGS="-v4l2 $V4L2_DEVICE $ARGS"
+else
+    ARGS="-ss $SPI_SPEED $ARGS"
+fi
+
 # Run the application
-./raspberrypi_video \
-    -tl $LEPTON_TYPE \
-    -ss $SPI_SPEED \
-    -min $TEMP_MIN \
-    -max $TEMP_MAX \
-    -sigmin $SIG_MIN \
-    -sigmax $SIG_MAX \
-    -ver $PALETTE_VERSION \
-    -cm $COLORMAP \
-    -d $LOG_LEVEL
+./raspberrypi_video $ARGS
 
 # Exit with the same code as the application
 exit $?

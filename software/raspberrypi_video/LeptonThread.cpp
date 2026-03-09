@@ -11,6 +11,10 @@
 #include <chrono>
 #include <vector>
 #include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cstring>
+#include <sys/mman.h>
 #define PACKET_SIZE 164
 #define PACKET_SIZE_UINT16 (PACKET_SIZE/2)
 #define PACKETS_PER_FRAME 60
@@ -24,7 +28,15 @@ LeptonThread::LeptonThread() : QThread()
 	shouldStop = false;  // 종료 플래그 초기화
 	vidsendbuf = nullptr;  // 버퍼 초기화
 	prev_vidsendbuf = nullptr;  // 이전 프레임 버퍼 초기화
-	v4l2sink = -1;  // 파일 디스크립터 초기화
+	v4l2sink = -1;
+	for (int i = 0; i < V4L2_NBUF; i++) v4l2_bufs_[i] = nullptr;
+	v4l2_buf_len_ = 0;
+	v4l2_queued_ = 0;
+	use_v4l2_input_ = false;
+	v4l2src_fd_ = -1;
+	for (int i = 0; i < V4L2_SRC_NBUF; i++) v4l2src_bufs_[i] = nullptr;
+	v4l2src_buf_len_ = 0;
+	v4l2src_nbuf_ = 0;
 	frameValid = false;  // 프레임 유효성 플래그 초기화
 
 	//
@@ -67,8 +79,32 @@ LeptonThread::~LeptonThread() {
 		prev_vidsendbuf = nullptr;
 	}
 	if (v4l2sink >= 0) {
+		enum v4l2_buf_type t = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+		ioctl(v4l2sink, VIDIOC_STREAMOFF, &t);
+		for (int i = 0; i < V4L2_NBUF && v4l2_bufs_[i]; i++) {
+			munmap(v4l2_bufs_[i], v4l2_buf_len_);
+			v4l2_bufs_[i] = nullptr;
+		}
 		close(v4l2sink);
 		v4l2sink = -1;
+	}
+	if (v4l2src_fd_ >= 0) {
+		enum v4l2_buf_type t = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		ioctl(v4l2src_fd_, VIDIOC_STREAMOFF, &t);
+		for (int i = 0; i < V4L2_SRC_NBUF && v4l2src_bufs_[i]; i++) {
+			munmap(v4l2src_bufs_[i], v4l2src_buf_len_);
+			v4l2src_bufs_[i] = nullptr;
+		}
+		v4l2src_nbuf_ = 0;
+		close(v4l2src_fd_);
+		v4l2src_fd_ = -1;
+	}
+}
+
+void LeptonThread::useV4l2Input(const char* device) {
+	if (device && device[0]) {
+		use_v4l2_input_ = true;
+		v4l2_device_ = device;
 	}
 }
 
@@ -86,8 +122,13 @@ void LeptonThread::stop() {
 		capture_cv_.wakeAll();
 	}
 
-	// Close v4l2 sink to unblock write().
 	if (v4l2sink >= 0) {
+		enum v4l2_buf_type t = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+		ioctl(v4l2sink, VIDIOC_STREAMOFF, &t);
+		for (int i = 0; i < V4L2_NBUF && v4l2_bufs_[i]; i++) {
+			munmap(v4l2_bufs_[i], v4l2_buf_len_);
+			v4l2_bufs_[i] = nullptr;
+		}
 		::close(v4l2sink);
 		v4l2sink = -1;
 	}
@@ -97,6 +138,19 @@ void LeptonThread::stop() {
 	if (spi_cs0_fd >= 0) {
 		::close(spi_cs0_fd);
 		spi_cs0_fd = -1;
+	}
+
+	// Close V4L2 capture fd (stream off + munmap first).
+	if (v4l2src_fd_ >= 0) {
+		enum v4l2_buf_type t = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		ioctl(v4l2src_fd_, VIDIOC_STREAMOFF, &t);
+		for (int i = 0; i < V4L2_SRC_NBUF && v4l2src_bufs_[i]; i++) {
+			munmap(v4l2src_bufs_[i], v4l2src_buf_len_);
+			v4l2src_bufs_[i] = nullptr;
+		}
+		v4l2src_nbuf_ = 0;
+		::close(v4l2src_fd_);
+		v4l2src_fd_ = -1;
 	}
 }
 
@@ -186,14 +240,283 @@ void LeptonThread::run()
 	uint8_t prev_r = 0, prev_g = 0, prev_b = 0;
 	bool has_prev_pixel = false;
 
-	//open spi port
-	SpiOpenPort(0, spiSpeed);
+	if (use_v4l2_input_) {
+		// pure_thermal 등 V4L2 장치를 Y16 모드로 캡처
+		// 일부 UVC 드라이버는 ioctl S_FMT만으로 Y16 전환이 안 되므로, v4l2-ctl로 선설정 시도
+		char v4l2ctl_cmd[256];
+		snprintf(v4l2ctl_cmd, sizeof(v4l2ctl_cmd),
+		         "v4l2-ctl -d %s --set-fmt-video=width=160,height=120,pixelformat=Y16 2>/dev/null",
+		         v4l2_device_.c_str());
+		if (system(v4l2ctl_cmd) != 0) {
+			fprintf(stderr, "[raspberrypi_video] v4l2-ctl pre-set (optional) failed, trying ioctl...\n");
+		}
+		v4l2src_fd_ = open(v4l2_device_.c_str(), O_RDWR);  // blocking: pure_thermal 9fps에 read() 호환
+		if (v4l2src_fd_ < 0) {
+			fprintf(stderr, "Failed to open V4L2 capture device %s: %s\n", v4l2_device_.c_str(), strerror(errno));
+			return;
+		}
+		struct v4l2_format fmt;
+		memset(&fmt, 0, sizeof(fmt));
+		fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		fmt.fmt.pix.width = 160;
+		fmt.fmt.pix.height = 120;
+		fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_Y16;
+		if (ioctl(v4l2src_fd_, VIDIOC_S_FMT, &fmt) < 0) {
+			fprintf(stderr, "Failed to set Y16 format on %s: %s\n", v4l2_device_.c_str(), strerror(errno));
+			close(v4l2src_fd_);
+			v4l2src_fd_ = -1;
+			return;
+		}
+		// S_FMT 성공 후 실제 적용된 포맷 검증 (드라이버가 UYVY 등으로 되돌릴 수 있음)
+		if (fmt.fmt.pix.pixelformat != V4L2_PIX_FMT_Y16) {
+			uint32_t pf = fmt.fmt.pix.pixelformat;
+			fprintf(stderr, "[raspberrypi_video] WARNING: %s format is not Y16 (got 0x%08x '%c%c%c%c'). "
+			        "Run before start: v4l2-ctl -d %s --set-fmt-video=width=160,height=120,pixelformat=Y16\n",
+			        v4l2_device_.c_str(), pf,
+			        (char)(pf&0xff), (char)((pf>>8)&0xff), (char)((pf>>16)&0xff), (char)((pf>>24)&0xff),
+			        v4l2_device_.c_str());
+			close(v4l2src_fd_);
+			v4l2src_fd_ = -1;
+			return;
+		}
+		// pure_thermal은 160x120 고정
+		myImageWidth = 160;
+		myImageHeight = 120;
+		typeLepton = 3;
+		fprintf(stderr, "[raspberrypi_video] V4L2 Y16 capture from %s (160x120)\n", v4l2_device_.c_str());
+
+		// read() 미지원 드라이버용: mmap 스트리밍으로 캡처
+		struct v4l2_requestbuffers req;
+		memset(&req, 0, sizeof(req));
+		req.count = V4L2_SRC_NBUF;
+		req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		req.memory = V4L2_MEMORY_MMAP;
+		if (ioctl(v4l2src_fd_, VIDIOC_REQBUFS, &req) < 0) {
+			fprintf(stderr, "[raspberrypi_video] VIDIOC_REQBUFS capture failed: %s\n", strerror(errno));
+			close(v4l2src_fd_);
+			v4l2src_fd_ = -1;
+			return;
+		}
+		v4l2src_nbuf_ = static_cast<int>(req.count);
+		if (v4l2src_nbuf_ <= 0 || v4l2src_nbuf_ > V4L2_SRC_NBUF) {
+			fprintf(stderr, "[raspberrypi_video] no capture buffers\n");
+			close(v4l2src_fd_);
+			v4l2src_fd_ = -1;
+			return;
+		}
+		for (int i = 0; i < v4l2src_nbuf_; i++) {
+			struct v4l2_buffer buf;
+			memset(&buf, 0, sizeof(buf));
+			buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+			buf.memory = V4L2_MEMORY_MMAP;
+			buf.index = i;
+			if (ioctl(v4l2src_fd_, VIDIOC_QUERYBUF, &buf) < 0) {
+				fprintf(stderr, "[raspberrypi_video] VIDIOC_QUERYBUF capture failed: %s\n", strerror(errno));
+				for (int j = 0; j < i; j++) { munmap(v4l2src_bufs_[j], v4l2src_buf_len_); v4l2src_bufs_[j] = nullptr; }
+				close(v4l2src_fd_);
+				v4l2src_fd_ = -1;
+				return;
+			}
+			v4l2src_buf_len_ = buf.length;
+			v4l2src_bufs_[i] = mmap(nullptr, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, v4l2src_fd_, buf.m.offset);
+			if (v4l2src_bufs_[i] == MAP_FAILED) {
+				fprintf(stderr, "[raspberrypi_video] capture mmap failed: %s\n", strerror(errno));
+				for (int j = 0; j < i; j++) { munmap(v4l2src_bufs_[j], v4l2src_buf_len_); v4l2src_bufs_[j] = nullptr; }
+				close(v4l2src_fd_);
+				v4l2src_fd_ = -1;
+				return;
+			}
+		}
+		for (int i = 0; i < v4l2src_nbuf_; i++) {
+			struct v4l2_buffer buf;
+			memset(&buf, 0, sizeof(buf));
+			buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+			buf.memory = V4L2_MEMORY_MMAP;
+			buf.index = i;
+			if (ioctl(v4l2src_fd_, VIDIOC_QBUF, &buf) < 0) {
+				fprintf(stderr, "[raspberrypi_video] VIDIOC_QBUF capture failed: %s\n", strerror(errno));
+				for (int j = 0; j < v4l2src_nbuf_; j++) { munmap(v4l2src_bufs_[j], v4l2src_buf_len_); v4l2src_bufs_[j] = nullptr; }
+				close(v4l2src_fd_);
+				v4l2src_fd_ = -1;
+				return;
+			}
+		}
+		enum v4l2_buf_type cap_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		if (ioctl(v4l2src_fd_, VIDIOC_STREAMON, &cap_type) < 0) {
+			fprintf(stderr, "[raspberrypi_video] VIDIOC_STREAMON capture failed: %s\n", strerror(errno));
+			for (int i = 0; i < v4l2src_nbuf_; i++) { munmap(v4l2src_bufs_[i], v4l2src_buf_len_); v4l2src_bufs_[i] = nullptr; }
+			close(v4l2src_fd_);
+			v4l2src_fd_ = -1;
+			return;
+		}
+		fprintf(stderr, "[raspberrypi_video] V4L2 capture mmap streaming on (%d buffers)\n", v4l2src_nbuf_);
+	} else {
+		// SPI 직접 연결
+		SpiOpenPort(0, spiSpeed);
+	}
 
 	// Reusable work buffer for raw16 (centiKelvin) snapshot.
 	// We only commit this buffer to latest_raw_u16_ if the frame is valid.
 	std::vector<uint16_t> work_raw_u16;
 	work_raw_u16.resize(myImageWidth * myImageHeight);
 
+	if (use_v4l2_input_) {
+		// === V4L2 Y16 캡처 루프 (pure_thermal) ===
+		fprintf(stderr, "[V4L2] colormap=%s size=%d min=%u max=%u scale=%.3f\n",
+		        (typeColormap == 4) ? "custom" : (typeColormap == 3) ? "ironblack" : "other",
+		        colormapSize, minValue, maxValue, scale);
+		const size_t frame_bytes = static_cast<size_t>(myImageWidth) * static_cast<size_t>(myImageHeight) * 2;
+		std::vector<uint8_t> y16_buf(frame_bytes);
+		int frame_count = 0;
+		while (!shouldStop) {
+			const bool capture_this_frame = capture_requested_.load(std::memory_order_relaxed);
+			if (capture_this_frame) {
+				const size_t expected_raw_size = static_cast<size_t>(myImageWidth) * static_cast<size_t>(myImageHeight);
+				if (work_raw_u16.size() != expected_raw_size) work_raw_u16.resize(expected_raw_size);
+				std::fill(work_raw_u16.begin(), work_raw_u16.end(), 0);
+			}
+
+			// DQBUF: mmap 스트리밍에서 채워진 버퍼 하나 받기 (블로킹)
+			struct v4l2_buffer buf;
+			memset(&buf, 0, sizeof(buf));
+			buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+			buf.memory = V4L2_MEMORY_MMAP;
+			if (ioctl(v4l2src_fd_, VIDIOC_DQBUF, &buf) < 0) {
+				if (shouldStop) break;
+				if (errno == EAGAIN || errno == EWOULDBLOCK) {
+					usleep(5000);
+				} else {
+					fprintf(stderr, "[V4L2] DQBUF failed: %s\n", strerror(errno));
+					usleep(50000);
+				}
+				continue;
+			}
+			size_t bytesused = static_cast<size_t>(buf.bytesused);
+			if (bytesused < frame_bytes || buf.index >= static_cast<unsigned>(v4l2src_nbuf_)) {
+				(void)ioctl(v4l2src_fd_, VIDIOC_QBUF, &buf);
+				continue;
+			}
+			memcpy(y16_buf.data(), v4l2src_bufs_[buf.index], frame_bytes);
+			if (ioctl(v4l2src_fd_, VIDIOC_QBUF, &buf) < 0) {
+				fprintf(stderr, "[V4L2] QBUF failed: %s\n", strerror(errno));
+			}
+			if (frame_count == 0) fprintf(stderr, "[V4L2] first frame ok, %zu bytes\n", frame_bytes);
+
+			// 디버깅: raw 프레임 min/max (centiKelvin → Celsius)
+			uint16_t raw_min = 65535, raw_max = 0;
+			for (size_t i = 0; i < work_raw_u16.size(); i++) {
+				uint16_t v = y16_buf[i*2] | (static_cast<uint16_t>(y16_buf[i*2+1]) << 8);
+				if (v < raw_min) raw_min = v;
+				if (v > raw_max) raw_max = v;
+			}
+
+			// auto-range
+			if (autoRangeMin || autoRangeMax) {
+				minValue = autoRangeMin ? 65535u : minValue;
+				maxValue = autoRangeMax ? 0u : maxValue;
+				for (size_t i = 0; i < work_raw_u16.size(); i++) {
+					uint16_t v = y16_buf[i*2] | (static_cast<uint16_t>(y16_buf[i*2+1]) << 8);
+					if (v == 0) continue;
+					if (autoRangeMax && v > maxValue) maxValue = v;
+					if (autoRangeMin && v < minValue) minValue = v;
+				}
+				diff = maxValue - minValue;
+				scale = (diff > 0.0f) ? (3000.0f / diff) : 1.0f;
+			}
+
+			uchar* yuyvPtr = vidsendbuf;
+			has_prev_pixel = false;
+			frameValid = false;
+			int pixelsProcessed = 0;
+			for (int row = 0; row < myImageHeight; row++) {
+				for (int col = 0; col < myImageWidth; col++) {
+					size_t idx = static_cast<size_t>(row) * static_cast<size_t>(myImageWidth) + static_cast<size_t>(col);
+					uint16_t valueFrameBuffer = y16_buf[idx*2] | (static_cast<uint16_t>(y16_buf[idx*2+1]) << 8);
+					uint8_t r, g, b;
+					if (valueFrameBuffer == 0) {
+						r = g = b = 0;  // skip 시 YUYV 정렬 깨짐 → 0은 검은색으로 출력
+					} else {
+						pixelsProcessed++;
+						float vf = (valueFrameBuffer - minValue) * scale;
+						if (vf < 0) vf = 0;
+						if (vf > 2999) vf = 2999;  // colormap 0..2999
+						int value = static_cast<int>(vf);
+						int base_ofs = 3 * value;
+						int ofs_r = (base_ofs + 0 < colormapSize) ? base_ofs + 0 : colormapSize - 1;
+						int ofs_g = (base_ofs + 1 < colormapSize) ? base_ofs + 1 : colormapSize - 1;
+						int ofs_b = (base_ofs + 2 < colormapSize) ? base_ofs + 2 : colormapSize - 1;
+						r = colormap[ofs_r]; g = colormap[ofs_g]; b = colormap[ofs_b];
+					}
+					if (capture_this_frame) work_raw_u16[idx] = valueFrameBuffer;
+					if (!has_prev_pixel) { prev_r = r; prev_g = g; prev_b = b; has_prev_pixel = true; }
+					else {
+						int y1 = ((77*prev_r + 150*prev_g + 29*prev_b) >> 8);
+						int y2 = ((77*r + 150*g + 29*b) >> 8);
+						int r_avg = (prev_r + r) >> 1, g_avg = (prev_g + g) >> 1, b_avg = (prev_b + b) >> 1;
+						int u = ((-43*r_avg - 85*g_avg + 128*b_avg) >> 8) + 128;
+						int v = ((128*r_avg - 107*g_avg - 21*b_avg) >> 8) + 128;
+						y1 = (y1<0)?0:(y1>255)?255:y1; y2 = (y2<0)?0:(y2>255)?255:y2;
+						u = (u<0)?0:(u>255)?255:u; v = (v<0)?0:(v>255)?255:v;
+						*yuyvPtr++ = (uchar)y1; *yuyvPtr++ = (uchar)u; *yuyvPtr++ = (uchar)y2; *yuyvPtr++ = (uchar)v;
+						has_prev_pixel = false;
+					}
+				}
+			}
+			if (has_prev_pixel) {
+				int y1 = ((77*prev_r + 150*prev_g + 29*prev_b) >> 8);
+				int u = ((-43*prev_r - 85*prev_g + 128*prev_b) >> 8) + 128;
+				int v = ((128*prev_r - 107*prev_g - 21*prev_b) >> 8) + 128;
+				y1 = (y1<0)?0:(y1>255)?255:y1; u = (u<0)?0:(u>255)?255:u; v = (v<0)?0:(v>255)?255:v;
+				*yuyvPtr++ = (uchar)y1; *yuyvPtr++ = (uchar)u; *yuyvPtr++ = (uchar)y1; *yuyvPtr++ = (uchar)v;
+			}
+			int expectedPixels = myImageWidth * myImageHeight;
+			bool frameIncomplete = (pixelsProcessed < expectedPixels * 9 / 10);
+			if (++frame_count <= 3 || (frame_count % 90) == 0) {
+				float min_c = (raw_min <= 65534) ? (raw_min / 100.f - 273.15f) : 0.f;
+				float max_c = (raw_max > 0) ? (raw_max / 100.f - 273.15f) : 0.f;
+				fprintf(stderr, "[V4L2] frame %d raw min=%u (%.1f°C) max=%u (%.1f°C) px=%d/%d\n",
+				        frame_count, raw_min, min_c, raw_max, max_c, pixelsProcessed, expectedPixels);
+			}
+			if (frameIncomplete) {
+				if (prev_vidsendbuf) memcpy(vidsendbuf, prev_vidsendbuf, myImageWidth * myImageHeight * 2);
+				else memset(vidsendbuf, 0, myImageWidth * myImageHeight * 2);
+			} else {
+				if (!prev_vidsendbuf) prev_vidsendbuf = (uchar*)malloc(myImageWidth * myImageHeight * 2);
+				if (prev_vidsendbuf) memcpy(prev_vidsendbuf, vidsendbuf, myImageWidth * myImageHeight * 2);
+				frameValid = true;
+			}
+			uint64_t now_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+			{ QMutexLocker locker(&frame_stats_mutex_);
+				last_frame_ts_ms_ = now_ms; last_frame_valid_ = frameValid; last_frame_incomplete_ = frameIncomplete;
+				last_pixels_processed_ = pixelsProcessed; last_expected_pixels_ = expectedPixels;
+				last_spi_resets_ = 0; last_segment_number_ = -1; last_wrong_segment_streak_ = 0; last_zero_value_drop_streak_ = 0;
+			}
+			if (capture_this_frame && frameValid) {
+				{ QMutexLocker locker(&latest_mutex_);
+					latest_ts_ms_ = now_ms; latest_valid_ = frameValid; latest_range_min_ck_ = minValue; latest_range_max_ck_ = maxValue; latest_scale_ = scale;
+					if (latest_yuyv_.size() != static_cast<size_t>(myImageWidth)*myImageHeight*2) latest_yuyv_.resize(myImageWidth*myImageHeight*2);
+					memcpy(latest_yuyv_.data(), vidsendbuf, myImageWidth*myImageHeight*2);
+					latest_raw_u16_ = work_raw_u16;
+				}
+				{ QMutexLocker locker(&capture_mutex_); capture_seq_++; capture_requested_.store(false, std::memory_order_relaxed); capture_cv_.wakeAll(); }
+			}
+			updateVpipe();
+		}
+		if (v4l2src_fd_ >= 0) {
+			enum v4l2_buf_type t = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+			ioctl(v4l2src_fd_, VIDIOC_STREAMOFF, &t);
+			for (int i = 0; i < V4L2_SRC_NBUF && v4l2src_bufs_[i]; i++) {
+				munmap(v4l2src_bufs_[i], v4l2src_buf_len_);
+				v4l2src_bufs_[i] = nullptr;
+			}
+			v4l2src_nbuf_ = 0;
+			::close(v4l2src_fd_);
+			v4l2src_fd_ = -1;
+		}
+		return;
+	}
+
+	// === SPI 캡처 루프 ===
 	while(!shouldStop) {
 		// Capture is on-demand: only build raw snapshot buffers when a capture is requested.
 		const bool capture_this_frame = capture_requested_.load(std::memory_order_relaxed);
@@ -694,26 +1017,35 @@ void LeptonThread::log_message(uint16_t level, std::string msg)
 
 void LeptonThread::updateVpipe()
 {
-	// QImage 제거: run()에서 이미 YUYV422로 변환 완료
-	// 버퍼를 직접 v4l2에 출력
-	if (v4l2sink < 0 || vidsendbuf == nullptr) {
-		return;
+	if (v4l2sink < 0 || vidsendbuf == nullptr || v4l2_bufs_[0] == nullptr) return;
+	const int yuyvSize = myImageWidth * myImageHeight * 2;
+	int idx;
+	if (v4l2_queued_ < V4L2_NBUF) {
+		idx = v4l2_queued_;
+	} else {
+		struct v4l2_buffer buf;
+		memset(&buf, 0, sizeof(buf));
+		buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+		buf.memory = V4L2_MEMORY_MMAP;
+		if (ioctl(v4l2sink, VIDIOC_DQBUF, &buf) < 0) return;
+		idx = buf.index;
+		v4l2_queued_--;
 	}
-	int yuyvSize = myImageWidth * myImageHeight * 2; // YUYV422는 2 bytes/pixel
-	const ssize_t n = ::write(v4l2sink, vidsendbuf, yuyvSize);
-	if (n < 0) {
-		// Best-effort; on shutdown or when no consumer is ready, v4l2loopback may return EAGAIN/EPIPE.
-		if (errno == EAGAIN || errno == EPIPE || errno == EBADF) {
-			return;
-		}
-	}
+	memcpy(v4l2_bufs_[idx], vidsendbuf, static_cast<size_t>(yuyvSize));
+	struct v4l2_buffer buf;
+	memset(&buf, 0, sizeof(buf));
+	buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+	buf.memory = V4L2_MEMORY_MMAP;
+	buf.index = idx;
+	buf.bytesused = yuyvSize;
+	if (ioctl(v4l2sink, VIDIOC_QBUF, &buf) == 0) v4l2_queued_++;
 }
 
 void LeptonThread::open_vpipe() {
-    int vidsendsiz;
+    const int vidsendsiz = 160 * 120 * 2;  // YUYV422
+    vidsendbuf = (uchar*)malloc(vidsendsiz);
 
-    // Non-blocking helps avoid shutdown hangs in write() when downstream isn't consuming.
-    v4l2sink = open("/dev/video12", O_WRONLY | O_NONBLOCK);
+    v4l2sink = open("/dev/video12", O_RDWR | O_NONBLOCK);  // O_RDWR: STREAMON에 필요할 수 있음
     if (v4l2sink < 0) {
         fprintf(stderr, "Failed to open v4l2sink device. (%s)\n", strerror(errno));
         exit(-2);
@@ -721,22 +1053,69 @@ void LeptonThread::open_vpipe() {
 
     struct v4l2_format v;
     memset(&v, 0, sizeof(v));
-
     v.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
     v.fmt.pix.width = 160;
     v.fmt.pix.height = 120;
-    v.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV; // YUYV422 포맷으로 변경
-    // YUYV422는 2 bytes per pixel (160 * 120 * 2 = 38,400 bytes)
-    // 기존 RGB24는 3 bytes per pixel이었음 (메모리 33% 절약)
-    vidsendsiz = 160 * 120 * 2;
-    vidsendbuf = (uchar*)malloc(vidsendsiz);
-
+    v.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
     v.fmt.pix.sizeimage = vidsendsiz;
     if (ioctl(v4l2sink, VIDIOC_S_FMT, &v) < 0) {
         fprintf(stderr, "Failed to set format on v4l2sink. (%s)\n", strerror(errno));
         exit(-1);
     }
 
+    // pure_thermal 9 fps
+    struct v4l2_streamparm parm;
+    memset(&parm, 0, sizeof(parm));
+    parm.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+    parm.parm.output.timeperframe.numerator = 1;
+    parm.parm.output.timeperframe.denominator = 9;
+    ioctl(v4l2sink, VIDIOC_S_PARM, &parm);  // ignore error
+
+    struct v4l2_requestbuffers req;
+    memset(&req, 0, sizeof(req));
+    req.count = V4L2_NBUF;
+    req.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+    req.memory = V4L2_MEMORY_MMAP;
+    if (ioctl(v4l2sink, VIDIOC_REQBUFS, &req) < 0) {
+        fprintf(stderr, "VIDIOC_REQBUFS failed: %s\n", strerror(errno));
+        exit(-1);
+    }
+    for (unsigned int i = 0; i < req.count && i < static_cast<unsigned>(V4L2_NBUF); i++) {
+        struct v4l2_buffer buf;
+        memset(&buf, 0, sizeof(buf));
+        buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index = i;
+        if (ioctl(v4l2sink, VIDIOC_QUERYBUF, &buf) < 0) {
+            fprintf(stderr, "VIDIOC_QUERYBUF failed: %s\n", strerror(errno));
+            exit(-1);
+        }
+        v4l2_buf_len_ = buf.length;
+        v4l2_bufs_[i] = mmap(nullptr, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, v4l2sink, buf.m.offset);
+        if (v4l2_bufs_[i] == MAP_FAILED) {
+            fprintf(stderr, "mmap failed: %s\n", strerror(errno));
+            exit(-1);
+        }
+    }
+    // STREAMON 전에 초기 프레임 큐 (consumer 연결 시 데이터 대기)
+    for (int i = 0; i < V4L2_NBUF; i++) {
+        uint8_t* p = (uint8_t*)v4l2_bufs_[i];
+        for (size_t j = 0; j < v4l2_buf_len_; j += 4) {
+            p[j] = 0; p[j+1] = 128; p[j+2] = 0; p[j+3] = 128;  // YUYV black
+        }
+        struct v4l2_buffer buf;
+        memset(&buf, 0, sizeof(buf));
+        buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index = i;
+        buf.bytesused = vidsendsiz;
+        if (ioctl(v4l2sink, VIDIOC_QBUF, &buf) == 0) v4l2_queued_++;
+    }
+    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+    if (ioctl(v4l2sink, VIDIOC_STREAMON, &type) < 0) {
+        fprintf(stderr, "VIDIOC_STREAMON failed: %s\n", strerror(errno));
+        exit(-1);
+    }
 }
 
 

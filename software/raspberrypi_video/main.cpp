@@ -468,6 +468,8 @@ void printUsage(char *cmd) {
     char *cmdname = basename(cmd);
     printf("Usage: %s [OPTION]...\n"
            " -h      display this help and exit\n"
+           " -v4l2 x use V4L2 capture device (e.g. /dev/video0) in Y16 mode (pure_thermal)\n"
+           "           when set, SPI input is disabled\n"
            " -cm x   select colormap\n"
            "           1 : rainbow\n"
            "           2 : grayscale\n"
@@ -493,6 +495,7 @@ int main(int argc, char **argv) {
     int rangeMin = -1;      
     int rangeMax = -1;
     int loglevel = 0;
+    const char* v4l2_device = nullptr;
     //target temperature
     int sigMin = -1;
     int sigMax = -1;
@@ -507,6 +510,9 @@ int main(int argc, char **argv) {
             exit(0);
         } else if (strcmp(argv[i], "-d") == 0 && (i + 1 != argc)) {
             loglevel = std::atoi(argv[i + 1]) & 0xFF;
+            i++;
+        } else if (strcmp(argv[i], "-v4l2") == 0 && (i + 1 != argc)) {
+            v4l2_device = argv[i + 1];
             i++;
         } else if (strcmp(argv[i], "-cm") == 0 && (i + 1 != argc)) {
             int val = std::atoi(argv[i + 1]);
@@ -576,6 +582,9 @@ int main(int argc, char **argv) {
 
     LeptonThread *thread = new LeptonThread();
     thread->setLogLevel(loglevel);
+    if (v4l2_device) {
+        thread->useV4l2Input(v4l2_device);
+    }
     // sigMin/sigMax이 주어진 경우에만 PaletteCustomizing 적용
     if (sigMin >= 0 && sigMax >= 0) {
         if (ver == 1) customizePalette(sigMin, sigMax, rangeMin, rangeMax);

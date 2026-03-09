@@ -48,6 +48,16 @@ make sdkclean && make distclean
 ./raspberrypi_video -tl 3
 ```
 
+### pure_thermal (V4L2 Y16 캡처)
+
+pure_thermal 보드를 `/dev/video0` 등 V4L2 장치로 사용할 때, `-v4l2` 옵션으로 Y16 모드를 자동 설정하고 캡처합니다:
+
+```bash
+./raspberrypi_video -v4l2 /dev/video0 -tl 3
+```
+
+`run.sh`에서 `V4L2_DEVICE="/dev/video0"`으로 설정해도 됩니다.
+
 라즈베리파이 4에서 CPU governor를 올리고 싶으면:
 
 ```bash
