@@ -434,18 +434,30 @@ void LeptonThread::run()
 					uint16_t valueFrameBuffer = y16_buf[idx*2] | (static_cast<uint16_t>(y16_buf[idx*2+1]) << 8);
 					uint8_t r, g, b;
 					if (valueFrameBuffer == 0) {
-						r = g = b = 0;  // skip 시 YUYV 정렬 깨짐 → 0은 검은색으로 출력
+						// 센서가 0을 반환하는 경우는 "invalid" 의미로 사용되므로 그대로 검정으로 출력한다.
+						r = g = b = 0;
+					} else if (valueFrameBuffer <= minValue) {
+						// min 이하(예: 0°C 및 그 이하)는 항상 화이트로 표현
+						r = g = b = 255;
+					} else if (valueFrameBuffer >= maxValue) {
+						// max 이상(예: 50°C 및 그 초과)은 항상 블랙으로 표현
+						r = g = b = 0;
 					} else {
+						// 정상 범위(min < value < max)는 3000 step under-mapping으로 팔레트에 매핑
 						pixelsProcessed++;
-						float vf = (valueFrameBuffer - minValue) * scale;
-						if (vf < 0) vf = 0;
-						if (vf > 2999) vf = 2999;  // colormap 0..2999
-						int value = static_cast<int>(vf);
-						int base_ofs = 3 * value;
-						int ofs_r = (base_ofs + 0 < colormapSize) ? base_ofs + 0 : colormapSize - 1;
-						int ofs_g = (base_ofs + 1 < colormapSize) ? base_ofs + 1 : colormapSize - 1;
-						int ofs_b = (base_ofs + 2 < colormapSize) ? base_ofs + 2 : colormapSize - 1;
-						r = colormap[ofs_r]; g = colormap[ofs_g]; b = colormap[ofs_b];
+						const float diff_local = static_cast<float>(maxValue - minValue);
+						const float scale_local = (diff_local > 0.0f) ? (3000.0f / diff_local) : 1.0f;
+						float vf = (static_cast<float>(valueFrameBuffer) - static_cast<float>(minValue)) * scale_local;
+						if (vf < 0.0f) vf = 0.0f;
+						if (vf > 2999.0f) vf = 2999.0f;  // 정상 구간 3000 step (0..2999)
+						const int value = static_cast<int>(vf);  // under-mapping
+						const int base_ofs = 3 * value;
+						const int ofs_r = (base_ofs + 0 < colormapSize) ? base_ofs + 0 : colormapSize - 1;
+						const int ofs_g = (base_ofs + 1 < colormapSize) ? base_ofs + 1 : colormapSize - 1;
+						const int ofs_b = (base_ofs + 2 < colormapSize) ? base_ofs + 2 : colormapSize - 1;
+						r = static_cast<uint8_t>(colormap[ofs_r]);
+						g = static_cast<uint8_t>(colormap[ofs_g]);
+						b = static_cast<uint8_t>(colormap[ofs_b]);
 					}
 					if (capture_this_frame) work_raw_u16[idx] = valueFrameBuffer;
 					if (!has_prev_pixel) { prev_r = r; prev_g = g; prev_b = b; has_prev_pixel = true; }

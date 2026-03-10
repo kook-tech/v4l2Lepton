@@ -111,6 +111,106 @@ static bool save_jpg_from_yuyv(const QString& jpg_path, const std::vector<uint8_
 	return true;
 }
 
+// raw16(centiKelvin) + 팔레트 → RGB PNG (YUYV 경유 없음, 무손실)
+static bool save_png_from_raw(
+    const QString& png_path,
+    const std::vector<uint16_t>& raw_u16,
+    int width,
+    int height,
+    uint16_t scale_min_ck,
+    uint16_t scale_max_ck,
+    int type_colormap,
+    QString* err)
+{
+	if (png_path.isEmpty()) return true;
+	if (!ensure_parent_dir(png_path, err)) return false;
+	if (static_cast<int>(raw_u16.size()) < width * height) {
+		if (err) *err = "raw_u16 buffer too small";
+		return false;
+	}
+
+	const int* cmap = nullptr;
+	int cmap_size = 0;
+
+	if (type_colormap == 1) {
+		cmap = colormap_rainbow;
+		cmap_size = get_size_colormap_rainbow();
+	} else if (type_colormap == 2) {
+		cmap = colormap_grayscale;
+		cmap_size = get_size_colormap_grayscale();
+	} else if (type_colormap == 4) {
+		// custom 팔레트: customizePalette2가 colormap_custom을 채운 상태
+		cmap = colormap_custom;
+		cmap_size = get_size_colormap_custom();
+	} else {
+		// 그 외에는 ironblack 기본 팔레트 사용
+		cmap = colormap_ironblack;
+		cmap_size = get_size_colormap_ironblack();
+	}
+
+	if (!cmap || cmap_size < 3) {
+		if (err) *err = "invalid colormap";
+		return false;
+	}
+
+	std::vector<uint8_t> rgb;
+	rgb.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 3);
+
+	const float diff = static_cast<float>(static_cast<int>(scale_max_ck) - static_cast<int>(scale_min_ck));
+	const float scale = (diff > 0.0f) ? (3000.0f / diff) : 1.0f;
+
+	for (int i = 0; i < width * height; ++i) {
+		const uint16_t v = raw_u16[static_cast<size_t>(i)];
+		uint8_t r = 0, g = 0, b = 0;
+
+		if (v == 0) {
+			// invalid → black
+			r = g = b = 0;
+		} else if (v <= scale_min_ck) {
+			// min 이하 → white
+			r = g = b = 255;
+		} else if (v >= scale_max_ck) {
+			// max 이상 → black
+			r = g = b = 0;
+		} else {
+			float vf = (static_cast<float>(v) - static_cast<float>(scale_min_ck)) * scale;
+			if (vf < 0.0f) vf = 0.0f;
+			if (vf > 2999.0f) vf = 2999.0f;
+			const int idx = static_cast<int>(vf);
+			const int base = idx * 3;
+			const int ofs_r = (base + 0 < cmap_size) ? base + 0 : cmap_size - 1;
+			const int ofs_g = (base + 1 < cmap_size) ? base + 1 : cmap_size - 1;
+			const int ofs_b = (base + 2 < cmap_size) ? base + 2 : cmap_size - 1;
+			r = static_cast<uint8_t>(cmap[ofs_r]);
+			g = static_cast<uint8_t>(cmap[ofs_g]);
+			b = static_cast<uint8_t>(cmap[ofs_b]);
+		}
+
+		const size_t base_rgb = static_cast<size_t>(i) * 3;
+		rgb[base_rgb + 0] = r;
+		rgb[base_rgb + 1] = g;
+		rgb[base_rgb + 2] = b;
+	}
+
+	QImage img(reinterpret_cast<const uchar*>(rgb.data()), width, height, QImage::Format_RGB888);
+	QImage detached = img.copy();
+
+	QSaveFile f(png_path);
+	if (!f.open(QIODevice::WriteOnly)) {
+		if (err) *err = QString("Failed to open png for write: %1").arg(png_path);
+		return false;
+	}
+	if (!detached.save(&f, "PNG")) {
+		if (err) *err = QString("Failed to encode png: %1").arg(png_path);
+		return false;
+	}
+	if (!f.commit()) {
+		if (err) *err = QString("Failed to commit png: %1").arg(png_path);
+		return false;
+	}
+	return true;
+}
+
 static bool save_raw16_dump(const QString& raw_path, const std::vector<uint16_t>& raw_u16, QString* err) {
 	if (!ensure_parent_dir(raw_path, err)) return false;
 	QSaveFile f(raw_path);
@@ -281,9 +381,15 @@ private:
 
 		const QJsonObject out = o.value("out").toObject();
 		job.jpg_path = out.value("jpg_path").toString();
+		job.png_path = out.value("png_path").toString();
 		job.raw_path = out.value("raw_path").toString();
 		job.meta_path = out.value("meta_path").toString();
 		job.jpg_quality = out.contains("jpg_quality") ? out.value("jpg_quality").toInt(90) : 90;
+
+		printf("[thermal_mqtt] capture_now received: request_id=%s png_path=%s raw_path=%s\n",
+			job.request_id.toUtf8().constData(),
+			job.png_path.toUtf8().constData(),
+			job.raw_path.toUtf8().constData());
 
 		{
 			std::lock_guard<std::mutex> lk(job_mu_);
@@ -309,6 +415,7 @@ private:
 		qint64 request_ts_ms = 0;
 		QString request_id;
 		QString jpg_path;
+		QString png_path;
 		QString raw_path;
 		QString meta_path;
 		int jpg_quality = 90;
@@ -333,9 +440,10 @@ private:
 			resp["request_ts_ms"] = job.request_ts_ms;
 			if (!job.request_id.isEmpty()) resp["request_id"] = job.request_id;
 
-			if (job.jpg_path.isEmpty() || job.raw_path.isEmpty()) {
+			// 최소 요구 조건: raw_path는 항상 필요, 그리고 jpg 또는 png 중 하나는 있어야 한다.
+			if (job.raw_path.isEmpty() || (job.jpg_path.isEmpty() && job.png_path.isEmpty())) {
 				resp["status"] = "failed";
-				resp["error"] = "out.jpg_path and out.raw_path are required";
+				resp["error"] = "out.raw_path and at least one of out.jpg_path/png_path are required";
 				publish_result(resp);
 				continue;
 			}
@@ -423,11 +531,22 @@ private:
 				publish_result(resp);
 				continue;
 			}
-			if (!save_jpg_from_yuyv(job.jpg_path, yuyv, w, h, job.jpg_quality, &err)) {
-				resp["status"] = "failed";
-				resp["error"] = err;
-				publish_result(resp);
-				continue;
+			// 옵션: 요청에 따라 PNG와 JPG를 각각 저장한다.
+			if (!job.png_path.isEmpty()) {
+				if (!save_png_from_raw(job.png_path, raw_u16, w, h, scale_min_ck, scale_max_ck, type_colormap, &err)) {
+					resp["status"] = "failed";
+					resp["error"] = err;
+					publish_result(resp);
+					continue;
+				}
+			}
+			if (!job.jpg_path.isEmpty()) {
+				if (!save_jpg_from_yuyv(job.jpg_path, yuyv, w, h, job.jpg_quality, &err)) {
+					resp["status"] = "failed";
+					resp["error"] = err;
+					publish_result(resp);
+					continue;
+				}
 			}
 			// meta_path is optional; prefer carrying metadata via capture_result for actions_result.json.
 			if (!job.meta_path.isEmpty()) {
@@ -441,11 +560,14 @@ private:
 			}
 
 			resp["status"] = "completed";
-			resp["jpg_path"] = job.jpg_path;
+			if (!job.jpg_path.isEmpty()) resp["jpg_path"] = job.jpg_path;
+			if (!job.png_path.isEmpty()) resp["png_path"] = job.png_path;
 			resp["raw_path"] = job.raw_path;
 			// meta_path is optional (most clients can rely on capture_result metadata).
 			if (!job.meta_path.isEmpty()) resp["meta_path"] = job.meta_path;
 			publish_result(resp);
+			printf("[thermal_mqtt] capture result published: status=completed request_id=%s\n",
+				job.request_id.toUtf8().constData());
 		}
 	}
 

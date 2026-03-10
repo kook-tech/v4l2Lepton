@@ -6017,7 +6017,7 @@ int colormap_custom[] = {
 255,0,0,
 255,0,0,
 255,0,0,
--1
+255,0,0
 };
 int get_size_colormap(const int colormap[]) {
     int n = 0;
@@ -6109,8 +6109,12 @@ double sigmoid(double x) {
 
 void customizePalette2(int sigMin, int sigMax, int rangeMin, int rangeMax) {
     const int* base = colormap_custom;
-    const int numColors = get_size_colormap_custom() / 3;
-    int custom_colormap[numColors*3];
+    // colormap_custom는 3000개의 RGB 엔트리를 기준으로 설계되어 있으므로,
+    // get_size_colormap_custom() 결과가 더 크더라도 최대 3000개까지만 사용한다.
+    int numColors = get_size_colormap_custom() / 3;
+    if (numColors > 3000) numColors = 3000;
+    if (numColors <= 0) numColors = 3000;  // 방어적 기본값
+    int custom_colormap[numColors * 3];
 
     const int base_min = rangeMin == -1 ? 26315 : rangeMin;
     const int base_max = rangeMax == -1 ? 41315 : rangeMax;
@@ -6149,6 +6153,14 @@ void customizePalette2(int sigMin, int sigMax, int rangeMin, int rangeMax) {
     for (int i = 0; i < numColors * 3; ++i) {
         colormap_custom[i] = custom_colormap[i];
     }
+
+    // 정상 범위의 최댓값(예: max°C)에 대응하는 마지막 엔트리는 항상 거의 검은색(1,1,1)으로 고정한다.
+    if (numColors > 0) {
+        const int last = numColors - 1;
+        colormap_custom[last * 3 + 0] = 1;
+        colormap_custom[last * 3 + 1] = 1;
+        colormap_custom[last * 3 + 2] = 1;
+    }
     
     
     //csv저장 및 출력
@@ -6161,10 +6173,36 @@ void customizePalette2(int sigMin, int sigMax, int rangeMin, int rangeMax) {
        (sigMin - 27315) / 100.0
        );
     
+    // customizePalette2에서는 실행 시 생성되는 colormap.csv를 다음과 같이 3002행으로 쓴다.
+    //  - 0번째 행     : min 이하 (under-range) → 255,255,255
+    //  - 1..numColors : 정상 범위 3000 step  → colormap_custom[0..numColors-1]
+    //  - 마지막 행    : max 초과 (over-range) → 0,0,0
+    {
+        int numColors = get_size_colormap_custom() / 3;
+        if (numColors > 3000) numColors = 3000;
+        if (numColors <= 0) numColors = 3000;
+        std::ofstream file("colormap.csv");
+        if (!file.is_open()) {
+            std::cerr << "파일 열기 실패: colormap.csv" << std::endl;
+        } else {
+            // 0번째 인덱스: min 이하 (under-range)용 화이트
+            file << 255 << "," << 255 << "," << 255 << "\n";
 
-    int size = get_size_colormap_custom();
-    exportColormapToCSV(colormap_custom, size);
-    //printf("ironblack size : %d\n", get_size_colormap_ironblack() );
+            // 1..numColors 인덱스: 정상 범위 팔레트 (3000개)
+            for (int i = 0; i < numColors; ++i) {
+                const int base = i * 3;
+                file << colormap_custom[base + 0] << ","
+                     << colormap_custom[base + 1] << ","
+                     << colormap_custom[base + 2] << "\n";
+            }
+
+            // 마지막 인덱스: max 초과 (over-range)용 블랙
+            file << 0 << "," << 0 << "," << 0 << "\n";
+
+            file.close();
+            std::cout << "컬러맵을 colormap.csv로 저장 완료 (3002 entries: under + 3000 normal + over)\n";
+        }
+    }
 }
 
 
