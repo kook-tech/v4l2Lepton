@@ -3018,7 +3018,6 @@ int colormap_ironblack[] = {
 };
 
 int colormap_custom[] = {
-0,0,255,    
 0,0,254,
 0,0,254,
 0,0,254,
@@ -6134,10 +6133,16 @@ void customizePalette2(int sigMin, int sigMax, int rangeMin, int rangeMax) {
        		colorIdx = (int)(numColors * 0.8 + subNorm * (numColors * 0.2));
     	}
 
-    	// 색상 복사
-    	custom_colormap[i * 3 + 0] = base[colorIdx * 3 + 0];
-    	custom_colormap[i * 3 + 1] = base[colorIdx * 3 + 1];
-    	custom_colormap[i * 3 + 2] = base[colorIdx * 3 + 2];
+    	// 색상 복사 + LSB 인코딩 (인덱스당 유일한 RGB, JPG 역복원 정확도 향상)
+    	int r = base[colorIdx * 3 + 0];
+    	int g = base[colorIdx * 3 + 1];
+    	int b = base[colorIdx * 3 + 2];
+    	r = (r & 0xFE) | ((i >> 0) & 1);
+    	g = (g & 0xFE) | ((i >> 1) & 1);
+    	b = (b & 0xFE) | ((i >> 2) & 1);
+    	custom_colormap[i * 3 + 0] = r;
+    	custom_colormap[i * 3 + 1] = g;
+    	custom_colormap[i * 3 + 2] = b;
     }
 
     // 덮어쓰기
@@ -6152,8 +6157,9 @@ void customizePalette2(int sigMin, int sigMax, int rangeMin, int rangeMax) {
        (rangeMax - 27315) / 100.0,
        (sigMin - 27315) / 100.0,
        (sigMax - 27315) / 100.0,
-       (sigMin - 27315) / 100.0,
-       (sigMax - 27315) / 100.0);
+       (sigMax - 27315) / 100.0,
+       (sigMin - 27315) / 100.0
+       );
     
 
     int size = get_size_colormap_custom();
