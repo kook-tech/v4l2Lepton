@@ -2,7 +2,7 @@
 #define TEXTTHREAD
 
 #include <ctime>
-#include <stdint.h>
+#include <cstdint>
 #include <atomic>
 #include <vector>
 #include <string>
@@ -82,6 +82,10 @@ public:
       int& out_segment_number,
       int& out_wrong_segment_streak,
       int& out_zero_value_drop_streak) const;
+
+  /** After MQTT capture_now 저장 성공 시: v4l2 스트림에만 짧은 캡처 이펙트(저장 JPG/PNG에는 비표시). */
+  void notifyCaptureStreamFxStart();
+
 public slots:
   void performFFC();
 
@@ -89,6 +93,12 @@ signals:
   // Qt GUI를 사용하지 않으므로 시그널 제거
 
 private:
+
+  void loadCaptureStreamFxEnv();
+  void applyCaptureStreamFxYuyv(uint8_t* dst_yuyv, const uint8_t* src_yuyv, int w, int h, double elapsed_sec) const;
+  static double captureFxSmoothstep01(double t);
+  static void yuyvToRgb888(const uint8_t* yuyv, int w, int h, std::vector<uint8_t>& rgb);
+  static void rgb888ToYuyv(const uint8_t* rgb, int w, int h, uint8_t* yuyv);
 
   void log_message(uint16_t, std::string);
   uint16_t loglevel;
@@ -152,6 +162,24 @@ private:
   int last_wrong_segment_streak_ = 0;
   int last_zero_value_drop_streak_ = 0;
 
+  // capture_now 후 v4l2 스트림 전용 이펙트 (rgb_stream_capture.py 와 동일 ENV 이름 사용)
+  bool capture_fx_enabled_ = false;
+  double capture_fx_shrink_sec_ = 0.16;
+  double capture_fx_hold_sec_ = 0.10;
+  double capture_fx_fade_sec_ = 0.26;
+  double capture_fx_speed_ = 0.5;
+  double capture_fx_inset_ratio_ = 0.03;
+  /** 테두리/십자 선 두께(픽셀): RGB_CAPTURE_FX_LINE_REF 짧은 변 기준으로 스케일. */
+  int capture_fx_line_px_ = 2;
+  int capture_fx_line_ref_min_ = 480;
+  int capture_fx_rgb_r_ = 220;
+  int capture_fx_rgb_g_ = 40;
+  int capture_fx_rgb_b_ = 40;
+  std::atomic<std::int64_t> capture_fx_t0_ns_{0};
+  mutable std::vector<uint8_t> capture_fx_scratch_yuyv_;
+  mutable std::vector<uint8_t> capture_fx_rgb_;
+
 };
 
 #endif
+

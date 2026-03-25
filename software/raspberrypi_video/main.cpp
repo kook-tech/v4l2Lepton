@@ -310,19 +310,29 @@ public:
 			return false;
 		}
 		mosquitto_message_callback_set(mosq_, &ThermalCaptureMqtt::on_message);
+		mosquitto_connect_callback_set(mosq_, &ThermalCaptureMqtt::on_connect);
+		mosquitto_disconnect_callback_set(mosq_, &ThermalCaptureMqtt::on_disconnect);
+		mosquitto_reconnect_delay_set(mosq_, 1, 5, true);
 
-		const int rc = mosquitto_connect(mosq_, mqtt_host_.c_str(), mqtt_port_, 30);
-		if (rc != MOSQ_ERR_SUCCESS) {
-			std::cerr << "[thermal_mqtt] connect failed: " << mosquitto_strerror(rc) << std::endl;
-			return false;
-		}
-		// Subscribe primary topic and keep compatibility with the legacy "thermal" naming.
-		mosquitto_subscribe(mosq_, nullptr, cmd_topic_.c_str(), 1);
-		if (cmd_topic_ == "local/ir/cmd") {
-			mosquitto_subscribe(mosq_, nullptr, "local/thermal/cmd", 1);
+		const int kConnectMaxAttempts = 30;
+		for (int attempt = 1; attempt <= kConnectMaxAttempts; ++attempt) {
+			const int rc = mosquitto_connect(mosq_, mqtt_host_.c_str(), mqtt_port_, 30);
+			if (rc == MOSQ_ERR_SUCCESS) {
+				std::cerr << "[thermal_mqtt] connect queued " << mqtt_host_ << ":" << mqtt_port_
+				          << " (subscribe after CONNACK); publish: " << result_topic_ << std::endl;
+				break;
+			}
+			std::cerr << "[thermal_mqtt] connect failed: " << mosquitto_strerror(rc)
+			          << " (" << attempt << "/" << kConnectMaxAttempts << ")" << std::endl;
+			if (attempt == kConnectMaxAttempts) {
+				mosquitto_destroy(mosq_);
+				mosq_ = nullptr;
+				mosquitto_lib_cleanup();
+				return false;
+			}
+			std::this_thread::sleep_for(std::chrono::seconds(1));
 		}
 		mosquitto_loop_start(mosq_);
-		std::cerr << "[thermal_mqtt] subscribed: " << cmd_topic_ << " publish: " << result_topic_ << std::endl;
 
 		// Start worker thread for snapshot saving (avoid blocking mosquitto loop thread).
 		stop_worker_ = false;
@@ -355,6 +365,40 @@ public:
 	}
 
 private:
+	void subscribe_cmd_topics() {
+		if (!mosq_) return;
+		const int s = mosquitto_subscribe(mosq_, nullptr, cmd_topic_.c_str(), 1);
+		if (s != MOSQ_ERR_SUCCESS) {
+			std::cerr << "[thermal_mqtt] subscribe failed (" << cmd_topic_ << "): " << mosquitto_strerror(s) << std::endl;
+		} else {
+			std::cerr << "[thermal_mqtt] subscribed: " << cmd_topic_ << std::endl;
+		}
+		if (cmd_topic_ == "local/ir/cmd") {
+			const int s2 = mosquitto_subscribe(mosq_, nullptr, "local/thermal/cmd", 1);
+			if (s2 != MOSQ_ERR_SUCCESS) {
+				std::cerr << "[thermal_mqtt] subscribe failed (local/thermal/cmd): " << mosquitto_strerror(s2) << std::endl;
+			} else {
+				std::cerr << "[thermal_mqtt] subscribed: local/thermal/cmd" << std::endl;
+			}
+		}
+	}
+
+	static void on_connect(struct mosquitto*, void* userdata, int rc) {
+		auto* self = static_cast<ThermalCaptureMqtt*>(userdata);
+		if (!self) return;
+		if (rc == 0) {
+			std::cerr << "[thermal_mqtt] MQTT connected (CONNACK)" << std::endl;
+			self->subscribe_cmd_topics();
+		} else {
+			std::cerr << "[thermal_mqtt] MQTT CONNACK rejected rc=" << rc << " ("
+			          << mosquitto_connack_string(rc) << ")" << std::endl;
+		}
+	}
+
+	static void on_disconnect(struct mosquitto*, void* /*userdata*/, int rc) {
+		std::cerr << "[thermal_mqtt] disconnected rc=" << rc << std::endl;
+	}
+
 	static void on_message(struct mosquitto*, void* userdata, const struct mosquitto_message* msg) {
 		auto* self = static_cast<ThermalCaptureMqtt*>(userdata);
 		self->handle_message(msg);
@@ -568,6 +612,8 @@ private:
 			publish_result(resp);
 			printf("[thermal_mqtt] capture result published: status=completed request_id=%s\n",
 				job.request_id.toUtf8().constData());
+			// v4l2 스트림에만 캡처 이펙트 (저장된 JPG/PNG/RAW 버퍼는 비표시)
+			lepton_->notifyCaptureStreamFxStart();
 		}
 	}
 
@@ -755,4 +801,5 @@ int main(int argc, char **argv) {
     
     return 0;
 }
+
 

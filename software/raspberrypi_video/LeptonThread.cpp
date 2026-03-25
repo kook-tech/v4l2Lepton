@@ -9,7 +9,10 @@
 //
 #include <cmath>
 #include <chrono>
+#include <cstdlib>
+#include <algorithm>
 #include <vector>
+#include <cstring>
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -60,6 +63,7 @@ LeptonThread::LeptonThread() : QThread()
 	rangeMin = 30000;
 	rangeMax = 32000;
 	open_vpipe();
+	loadCaptureStreamFxEnv();
 }
 
 LeptonThread::~LeptonThread() {
@@ -1027,6 +1031,213 @@ void LeptonThread::log_message(uint16_t level, std::string msg)
 	}
 }
 
+static const char* getenv_def(const char* k, const char* d) {
+	const char* v = std::getenv(k);
+	return (v && v[0]) ? v : d;
+}
+
+void LeptonThread::loadCaptureStreamFxEnv() {
+	const std::string on = getenv_def("RGB_CAPTURE_FX", "1");
+	capture_fx_enabled_ = (on == "1" || on == "true" || on == "yes" || on == "on");
+	capture_fx_shrink_sec_ = std::atof(getenv_def("RGB_CAPTURE_FX_SHRINK_SEC", "0.16"));
+	capture_fx_hold_sec_ = std::atof(getenv_def("RGB_CAPTURE_FX_HOLD_SEC", "0.10"));
+	capture_fx_fade_sec_ = std::atof(getenv_def("RGB_CAPTURE_FX_FADE_SEC", "0.26"));
+	capture_fx_speed_ = std::atof(getenv_def("RGB_CAPTURE_FX_SPEED", "0.5"));
+	capture_fx_inset_ratio_ = std::atof(getenv_def("RGB_CAPTURE_FX_INSET_RATIO", "0.03"));
+	capture_fx_line_px_ = std::max(1, std::atoi(getenv_def("RGB_CAPTURE_FX_LINE_PX", "2")));
+	// 짧은 변이 이 값(기본 480≈640x480)일 때 LINE_PX가 그대로 적용된다고 보고 스케일 (IR 160x120이면 ~1/4 두께)
+	capture_fx_line_ref_min_ = std::max(1, std::atoi(getenv_def("RGB_CAPTURE_FX_LINE_REF", "480")));
+	capture_fx_rgb_b_ = std::atoi(getenv_def("RGB_CAPTURE_FX_B", "40"));
+	capture_fx_rgb_g_ = std::atoi(getenv_def("RGB_CAPTURE_FX_G", "40"));
+	capture_fx_rgb_r_ = std::atoi(getenv_def("RGB_CAPTURE_FX_R", "220"));
+}
+
+void LeptonThread::notifyCaptureStreamFxStart() {
+	if (!capture_fx_enabled_) return;
+	using clock = std::chrono::steady_clock;
+	const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+	    clock::now().time_since_epoch()).count();
+	capture_fx_t0_ns_.store(ns, std::memory_order_relaxed);
+}
+
+double LeptonThread::captureFxSmoothstep01(double t) {
+	if (t <= 0.0) return 0.0;
+	if (t >= 1.0) return 1.0;
+	return t * t * (3.0 - 2.0 * t);
+}
+
+void LeptonThread::yuyvToRgb888(const uint8_t* yuyv, int width, int height, std::vector<uint8_t>& out_rgb) {
+	out_rgb.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 3);
+	size_t rgb_i = 0;
+	const int num_pixels = width * height;
+	const uint8_t* p = yuyv;
+	for (int i = 0; i < num_pixels; i += 2) {
+		const int y0 = p[0];
+		const int u = p[1] - 128;
+		const int y1 = p[2];
+		const int v = p[3] - 128;
+		auto clamp8 = [](int x) -> uint8_t {
+			if (x < 0) return 0;
+			if (x > 255) return 255;
+			return static_cast<uint8_t>(x);
+		};
+		auto yuv_to_rgb = [&](int y, int u_, int v_) {
+			const int c = y - 16;
+			const int d = u_;
+			const int e = v_;
+			int r = (298 * c + 409 * e + 128) >> 8;
+			int g = (298 * c - 100 * d - 208 * e + 128) >> 8;
+			int b = (298 * c + 516 * d + 128) >> 8;
+			out_rgb[rgb_i++] = clamp8(r);
+			out_rgb[rgb_i++] = clamp8(g);
+			out_rgb[rgb_i++] = clamp8(b);
+		};
+		yuv_to_rgb(y0, u, v);
+		yuv_to_rgb(y1, u, v);
+		p += 4;
+	}
+}
+
+void LeptonThread::rgb888ToYuyv(const uint8_t* rgb, int width, int height, uint8_t* yuyv) {
+	auto clamp8 = [](int x) -> uint8_t {
+		if (x < 0) return 0;
+		if (x > 255) return 255;
+		return static_cast<uint8_t>(x);
+	};
+	for (int y = 0; y < height; ++y) {
+		for (int x = 0; x < width; x += 2) {
+			const size_t i0 = (static_cast<size_t>(y) * width + x) * 3;
+			int r0 = rgb[i0 + 0], g0 = rgb[i0 + 1], b0 = rgb[i0 + 2];
+			int r1 = r0, g1 = g0, b1 = b0;
+			if (x + 1 < width) {
+				const size_t i1 = i0 + 3;
+				r1 = rgb[i1 + 0]; g1 = rgb[i1 + 1]; b1 = rgb[i1 + 2];
+			}
+			const int y0 = ((66 * r0 + 129 * g0 + 25 * b0 + 128) >> 8);
+			const int y1 = ((66 * r1 + 129 * g1 + 25 * b1 + 128) >> 8);
+			const int u = ((-38 * (r0 + r1) - 74 * (g0 + g1) + 112 * (b0 + b1) + 256) >> 9) + 128;
+			const int v = ((112 * (r0 + r1) - 94 * (g0 + g1) - 18 * (b0 + b1) + 256) >> 9) + 128;
+			const int row_bytes = y * width * 2 + x * 2;
+			yuyv[row_bytes + 0] = clamp8(y0);
+			yuyv[row_bytes + 1] = clamp8(u);
+			yuyv[row_bytes + 2] = clamp8(y1);
+			yuyv[row_bytes + 3] = clamp8(v);
+		}
+	}
+}
+
+static void captureFxDrawHLineRgb(std::vector<uint8_t>& rgb, int w, int h, int y, int x0, int x1,
+    uint8_t R, uint8_t G, uint8_t B) {
+	if (y < 0 || y >= h) return;
+	x0 = std::max(0, x0);
+	x1 = std::min(w - 1, x1);
+	for (int x = x0; x <= x1; ++x) {
+		const size_t i = (static_cast<size_t>(y) * w + x) * 3;
+		rgb[i + 0] = R;
+		rgb[i + 1] = G;
+		rgb[i + 2] = B;
+	}
+}
+
+static void captureFxDrawVLineRgb(std::vector<uint8_t>& rgb, int w, int h, int x, int y0, int y1,
+    uint8_t R, uint8_t G, uint8_t B) {
+	if (x < 0 || x >= w) return;
+	y0 = std::max(0, y0);
+	y1 = std::min(h - 1, y1);
+	for (int y = y0; y <= y1; ++y) {
+		const size_t i = (static_cast<size_t>(y) * w + x) * 3;
+		rgb[i + 0] = R;
+		rgb[i + 1] = G;
+		rgb[i + 2] = B;
+	}
+}
+
+static void captureFxDrawRectOutlineRgb(std::vector<uint8_t>& rgb, int w, int h,
+    int inset, int th, uint8_t R, uint8_t G, uint8_t B) {
+	const int x0 = inset;
+	const int y0 = inset;
+	const int x1 = w - 1 - inset;
+	const int y1 = h - 1 - inset;
+	if (x1 <= x0 + th || y1 <= y0 + th) return;
+	for (int t = 0; t < th; ++t) {
+		captureFxDrawHLineRgb(rgb, w, h, y0 + t, x0, x1, R, G, B);
+		captureFxDrawHLineRgb(rgb, w, h, y1 - t, x0, x1, R, G, B);
+	}
+	for (int t = 0; t < th; ++t) {
+		captureFxDrawVLineRgb(rgb, w, h, x0 + t, y0 + th, y1 - th, R, G, B);
+		captureFxDrawVLineRgb(rgb, w, h, x1 - t, y0 + th, y1 - th, R, G, B);
+	}
+}
+
+void LeptonThread::applyCaptureStreamFxYuyv(uint8_t* dst_yuyv, const uint8_t* src_yuyv, int w, int h,
+    double elapsed_sec) const {
+	double sp = capture_fx_speed_;
+	if (sp < 0.2) sp = 0.2;
+	if (sp > 5.0) sp = 5.0;
+	const double inv = 1.0 / sp;
+	double t_shrink = std::max(0.02, capture_fx_shrink_sec_ * inv);
+	double t_hold = std::max(0.0, capture_fx_hold_sec_ * inv);
+	double t_fade = std::max(0.04, capture_fx_fade_sec_ * inv);
+	const double t_plus = t_shrink + t_hold;
+	const double total = t_shrink + t_hold + t_fade;
+	if (elapsed_sec >= total) {
+		std::memcpy(dst_yuyv, src_yuyv, static_cast<size_t>(w) * static_cast<size_t>(h) * 2);
+		return;
+	}
+
+	yuyvToRgb888(src_yuyv, w, h, capture_fx_rgb_);
+	const int inset_max = std::max(2, static_cast<int>(std::min(w, h) * capture_fx_inset_ratio_));
+	int inset = 0;
+	if (elapsed_sec < t_shrink) {
+		const double u = captureFxSmoothstep01(elapsed_sec / t_shrink);
+		inset = static_cast<int>(inset_max * u);
+	} else {
+		inset = inset_max;
+	}
+	double fade_k = 1.0;
+	if (elapsed_sec > t_plus)
+		fade_k = std::max(0.0, 1.0 - (elapsed_sec - t_plus) / t_fade);
+	const double base_alpha = 0.88 * fade_k;
+	const int mn = std::min(w, h);
+	const int ref = std::max(1, capture_fx_line_ref_min_);
+	const int th = std::max(1, (capture_fx_line_px_ * mn + ref / 2) / ref);
+	const uint8_t R = static_cast<uint8_t>(std::max(0, std::min(255, capture_fx_rgb_r_)));
+	const uint8_t G = static_cast<uint8_t>(std::max(0, std::min(255, capture_fx_rgb_g_)));
+	const uint8_t B = static_cast<uint8_t>(std::max(0, std::min(255, capture_fx_rgb_b_)));
+
+	std::vector<uint8_t> layer(static_cast<size_t>(w) * h * 3, 0);
+	captureFxDrawRectOutlineRgb(layer, w, h, inset, th, R, G, B);
+	if (elapsed_sec >= t_plus) {
+		const int cx = w / 2;
+		const int cy = h / 2;
+		const int arm = std::max(6, static_cast<int>(std::min(w, h) * 0.065));
+		captureFxDrawHLineRgb(layer, w, h, cy, cx - arm, cx + arm, R, G, B);
+		for (int dy = 1; dy < th; ++dy) {
+			captureFxDrawHLineRgb(layer, w, h, cy - dy, cx - arm, cx + arm, R, G, B);
+			captureFxDrawHLineRgb(layer, w, h, cy + dy, cx - arm, cx + arm, R, G, B);
+		}
+		captureFxDrawVLineRgb(layer, w, h, cx, cy - arm, cy + arm, R, G, B);
+		for (int dx = 1; dx < th; ++dx) {
+			captureFxDrawVLineRgb(layer, w, h, cx - dx, cy - arm, cy + arm, R, G, B);
+			captureFxDrawVLineRgb(layer, w, h, cx + dx, cy - arm, cy + arm, R, G, B);
+		}
+	}
+
+	const float a = static_cast<float>(base_alpha);
+	const float inv_a = 1.0f - a;
+	for (size_t i = 0; i < capture_fx_rgb_.size(); i += 3) {
+		const uint8_t lr = layer[i + 0], lg = layer[i + 1], lb = layer[i + 2];
+		if (!lr && !lg && !lb) continue;
+		const float fr = capture_fx_rgb_[i] * inv_a + lr * a;
+		const float fg = capture_fx_rgb_[i + 1] * inv_a + lg * a;
+		const float fb = capture_fx_rgb_[i + 2] * inv_a + lb * a;
+		capture_fx_rgb_[i] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, fr)));
+		capture_fx_rgb_[i + 1] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, fg)));
+		capture_fx_rgb_[i + 2] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, fb)));
+	}
+	rgb888ToYuyv(capture_fx_rgb_.data(), w, h, dst_yuyv);
+}
+
 void LeptonThread::updateVpipe()
 {
 	if (v4l2sink < 0 || vidsendbuf == nullptr || v4l2_bufs_[0] == nullptr) return;
@@ -1043,7 +1254,35 @@ void LeptonThread::updateVpipe()
 		idx = buf.index;
 		v4l2_queued_--;
 	}
-	memcpy(v4l2_bufs_[idx], vidsendbuf, static_cast<size_t>(yuyvSize));
+	const uint8_t* src_yuyv = vidsendbuf;
+	double elapsed_sec = 0.0;
+	bool apply_fx = false;
+	if (capture_fx_enabled_) {
+		const std::int64_t t0 = capture_fx_t0_ns_.load(std::memory_order_relaxed);
+		if (t0 != 0) {
+			using clock = std::chrono::steady_clock;
+			const std::int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+			    clock::now().time_since_epoch()).count();
+			elapsed_sec = (now - t0) * 1e-9;
+			double sp = capture_fx_speed_;
+			if (sp < 0.2) sp = 0.2;
+			if (sp > 5.0) sp = 5.0;
+			const double inv = 1.0 / sp;
+			const double total = std::max(0.05,
+			    (capture_fx_shrink_sec_ + capture_fx_hold_sec_ + capture_fx_fade_sec_) * inv);
+			if (elapsed_sec >= total) {
+				capture_fx_t0_ns_.store(0, std::memory_order_relaxed);
+			} else {
+				apply_fx = true;
+				if (capture_fx_scratch_yuyv_.size() < static_cast<size_t>(yuyvSize))
+					capture_fx_scratch_yuyv_.resize(static_cast<size_t>(yuyvSize));
+				applyCaptureStreamFxYuyv(capture_fx_scratch_yuyv_.data(), vidsendbuf, myImageWidth, myImageHeight,
+				    elapsed_sec);
+				src_yuyv = capture_fx_scratch_yuyv_.data();
+			}
+		}
+	}
+	memcpy(v4l2_bufs_[idx], src_yuyv, static_cast<size_t>(yuyvSize));
 	struct v4l2_buffer buf;
 	memset(&buf, 0, sizeof(buf));
 	buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
@@ -1129,6 +1368,7 @@ void LeptonThread::open_vpipe() {
         exit(-1);
     }
 }
+
 
 
 
