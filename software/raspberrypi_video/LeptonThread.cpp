@@ -17,8 +17,153 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <cstring>
+#include <cstdint>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <cstdio>
+#ifdef __has_include
+#  if __has_include(<linux/uvcvideo.h>)
+#    include <linux/uvcvideo.h>
+#    define HAVE_LINUX_UVCVIDEO 1
+#  endif
+#endif
+#ifndef UVC_SET_CUR
+#define UVC_SET_CUR 0x01
+#define UVC_GET_CUR 0x81
+#define UVC_GET_LEN 0x85
+#endif
+#ifndef HAVE_LINUX_UVCVIDEO
+struct uvc_xu_control_query {
+	uint8_t unit;
+	uint8_t selector;
+	uint8_t query;
+	uint16_t size;
+	uint8_t *data;
+};
+#ifndef UVC_SET_CUR
+#define UVC_SET_CUR 0x01
+#define UVC_GET_CUR 0x81
+#define UVC_GET_LEN 0x85
+#endif
+#ifndef UVCIOC_CTRL_QUERY
+#define UVCIOC_CTRL_QUERY _IOWR('u', 0x21, struct uvc_xu_control_query)
+#endif
+#endif
+
 #define PACKET_SIZE 164
+
+static float ir_ck_to_c(uint16_t ck) {
+	return (static_cast<float>(ck) / 100.f) - 273.15f;
+}
+
+static uint32_t ir_fourcc_u32(const v4l2_format& fmt) {
+	return fmt.fmt.pix.pixelformat;
+}
+
+static void ir_log_fourcc(const char* tag, const v4l2_format& fmt) {
+	const uint32_t pf = ir_fourcc_u32(fmt);
+	fprintf(stderr, "%s %dx%d fourcc=0x%08x '%c%c%c%c' bytesperline=%u sizeimage=%u\n",
+	        tag,
+	        fmt.fmt.pix.width, fmt.fmt.pix.height,
+	        pf,
+	        (char)(pf & 0xff), (char)((pf >> 8) & 0xff),
+	        (char)((pf >> 16) & 0xff), (char)((pf >> 24) & 0xff),
+	        fmt.fmt.pix.bytesperline, fmt.fmt.pix.sizeimage);
+}
+
+// ffplay(/dev/video12)가 검은 화면일 때 journalctl -u ir-stream 에서 원인 분류용.
+static const char* classify_ir_black_reason(
+    int n_zero, int n_below, int n_in, int n_above, int n_total,
+    uint16_t raw_max, bool incomplete, bool had_prev)
+{
+	if (n_total <= 0) return "no_pixels";
+	const int p90 = n_total * 9 / 10;
+	if (n_zero >= p90) return "source_all_zero";
+	if (n_below >= p90 && raw_max > 0 && raw_max < 16384) return "y16_not_tlinear_raw14";
+	if (n_below >= p90) return "all_below_scale_min";
+	if (n_above >= p90) return "all_above_scale_max";
+	if (incomplete && !had_prev) return "incomplete_no_prev_black_fill";
+	if (incomplete) return "incomplete_reuse_prev";
+	if (n_in < n_total / 10) return "palette_range_mismatch";
+	return "ok";
+}
+
+// PureThermal GetThermal firmware: XU unit 3=AGC, 4=OEM, 5=RAD.
+// selector = ((cci_offset & 0xff) >> 2) + 1
+// https://github.com/groupgets/purethermal1-firmware/wiki/Lepton-CCI-through-UVC-extension-units
+static const uint8_t kXuAgc = 3;
+static const uint8_t kXuOem = 4;
+static const uint8_t kXuRad = 5;
+static const uint8_t kSelAgcEnable = 1;            // LEP_CID_AGC_ENABLE_STATE +0x00
+static const uint8_t kSelOemVideoFormat = 11;      // LEP_CID_OEM_VIDEO_OUTPUT_FORMAT +0x28
+static const uint8_t kSelRadEnable = 5;            // LEP_CID_RAD_ENABLE_STATE +0x10
+static const uint8_t kSelRadTlinearEnable = 49;    // LEP_CID_RAD_TLINEAR_ENABLE_STATE +0xC0
+static const uint8_t kSelRadTlinearRes = 50;       // LEP_CID_RAD_TLINEAR_RESOLUTION +0xC4
+static const uint16_t kOemFmtRaw14 = 7;
+static const uint16_t kTlinearRes001 = 1;          // 0.01 K (centiKelvin)
+
+static int uvc_xu_query(int fd, uint8_t unit, uint8_t selector, uint8_t query, uint16_t size, uint8_t* data)
+{
+	struct uvc_xu_control_query q;
+	memset(&q, 0, sizeof(q));
+	q.unit = unit;
+	q.selector = selector;
+	q.query = query;
+	q.size = size;
+	q.data = data;
+	if (ioctl(fd, UVCIOC_CTRL_QUERY, &q) < 0) return -1;
+	return 0;
+}
+
+static bool uvc_xu_set_u16(int fd, uint8_t unit, uint8_t selector, uint16_t value, const char* name)
+{
+	uint8_t lenbuf[2] = {0, 0};
+	uint16_t len = 2;
+	if (uvc_xu_query(fd, unit, selector, UVC_GET_LEN, 2, lenbuf) == 0) {
+		len = (uint16_t)lenbuf[0] | ((uint16_t)lenbuf[1] << 8);
+		if (len == 0 || len > 8) len = 2;
+	}
+	uint8_t buf[8];
+	memset(buf, 0, sizeof(buf));
+	buf[0] = (uint8_t)(value & 0xff);
+	buf[1] = (uint8_t)((value >> 8) & 0xff);
+	if (uvc_xu_query(fd, unit, selector, UVC_SET_CUR, len, buf) != 0) {
+		fprintf(stderr, "[IR-DIAG] XU SET %s unit=%u sel=%u len=%u val=%u failed: %s\n",
+		        name, unit, selector, len, value, strerror(errno));
+		return false;
+	}
+	uint8_t rbuf[8];
+	memset(rbuf, 0, sizeof(rbuf));
+	if (uvc_xu_query(fd, unit, selector, UVC_GET_CUR, len, rbuf) == 0) {
+		const uint16_t got = (uint16_t)rbuf[0] | ((uint16_t)rbuf[1] << 8);
+		fprintf(stderr, "[IR-DIAG] XU %s set=%u get=%u\n", name, value, got);
+	} else {
+		fprintf(stderr, "[IR-DIAG] XU %s SET ok (GET_CUR skipped: %s)\n", name, strerror(errno));
+	}
+	return true;
+}
+
+static bool enable_purethermal_tlinear(int fd)
+{
+	const char* skip = getenv("IR_SKIP_TLINEAR");
+	if (skip && skip[0] == '1') {
+		fprintf(stderr, "[IR-DIAG] TLinear XU skipped (IR_SKIP_TLINEAR=1)\n");
+		return true;
+	}
+	fprintf(stderr, "[IR-DIAG] enabling TLinear via UVC XU (AGC off, RAD on, TLinear 0.01K)\n");
+	(void)uvc_xu_set_u16(fd, kXuAgc, kSelAgcEnable, 0, "agc_disable");
+	(void)uvc_xu_set_u16(fd, kXuOem, kSelOemVideoFormat, kOemFmtRaw14, "oem_raw14");
+	(void)uvc_xu_set_u16(fd, kXuRad, kSelRadEnable, 1, "rad_enable");
+	const bool tlin = uvc_xu_set_u16(fd, kXuRad, kSelRadTlinearEnable, 1, "tlinear_enable");
+	const bool tres = uvc_xu_set_u16(fd, kXuRad, kSelRadTlinearRes, kTlinearRes001, "tlinear_res_0.01");
+	if (!tlin || !tres) {
+		fprintf(stderr, "[IR-DIAG] TLinear XU incomplete — if likely=y16_not_tlinear_raw14 persists, "
+		        "XU unit/selector mismatch or lepton not ready yet\n");
+		return false;
+	}
+	fprintf(stderr, "[IR-DIAG] TLinear XU applied (room-temp raw mean should be ~29000-31000 cK)\n");
+	return true;
+}
 #define PACKET_SIZE_UINT16 (PACKET_SIZE/2)
 #define PACKETS_PER_FRAME 60
 #define FRAME_SIZE_UINT16 (PACKET_SIZE_UINT16*PACKETS_PER_FRAME)
@@ -272,10 +417,19 @@ void LeptonThread::run()
 			return;
 		}
 		// S_FMT 성공 후 실제 적용된 포맷 검증 (드라이버가 UYVY 등으로 되돌릴 수 있음)
+		{
+			struct v4l2_format got;
+			memset(&got, 0, sizeof(got));
+			got.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+			if (ioctl(v4l2src_fd_, VIDIOC_G_FMT, &got) == 0) {
+				ir_log_fourcc("[IR-DIAG] src G_FMT", got);
+			}
+		}
 		if (fmt.fmt.pix.pixelformat != V4L2_PIX_FMT_Y16) {
 			uint32_t pf = fmt.fmt.pix.pixelformat;
-			fprintf(stderr, "[raspberrypi_video] WARNING: %s format is not Y16 (got 0x%08x '%c%c%c%c'). "
-			        "Run before start: v4l2-ctl -d %s --set-fmt-video=width=160,height=120,pixelformat=Y16\n",
+			fprintf(stderr, "[IR-DIAG] likely=src_not_y16; ffplay(/dev/video12) stays at init BLACK. "
+			        "%s format is not Y16 (got 0x%08x '%c%c%c%c'). "
+			        "Run: v4l2-ctl -d %s --set-fmt-video=width=160,height=120,pixelformat=Y16\n",
 			        v4l2_device_.c_str(), pf,
 			        (char)(pf&0xff), (char)((pf>>8)&0xff), (char)((pf>>16)&0xff), (char)((pf>>24)&0xff),
 			        v4l2_device_.c_str());
@@ -287,7 +441,16 @@ void LeptonThread::run()
 		myImageWidth = 160;
 		myImageHeight = 120;
 		typeLepton = 3;
-		fprintf(stderr, "[raspberrypi_video] V4L2 Y16 capture from %s (160x120)\n", v4l2_device_.c_str());
+		fprintf(stderr, "[IR-DIAG] V4L2 Y16 capture from %s (160x120). "
+		        "ffplay black: see periodic [IR-DIAG] likely= ... (journalctl -u ir-stream)\n",
+		        v4l2_device_.c_str());
+
+		bool tlinear_ok = enable_purethermal_tlinear(v4l2src_fd_);
+		if (!tlinear_ok) {
+			usleep(250000);
+			fprintf(stderr, "[IR-DIAG] TLinear XU retry after 250ms\n");
+			tlinear_ok = enable_purethermal_tlinear(v4l2src_fd_);
+		}
 
 		// read() 미지원 드라이버용: mmap 스트리밍으로 캡처
 		struct v4l2_requestbuffers req;
@@ -354,6 +517,11 @@ void LeptonThread::run()
 			return;
 		}
 		fprintf(stderr, "[raspberrypi_video] V4L2 capture mmap streaming on (%d buffers)\n", v4l2src_nbuf_);
+		if (!tlinear_ok) {
+			usleep(250000);
+			fprintf(stderr, "[IR-DIAG] TLinear XU retry after STREAMON\n");
+			tlinear_ok = enable_purethermal_tlinear(v4l2src_fd_);
+		}
 	} else {
 		// SPI 직접 연결
 		SpiOpenPort(0, spiSpeed);
@@ -366,12 +534,15 @@ void LeptonThread::run()
 
 	if (use_v4l2_input_) {
 		// === V4L2 Y16 캡처 루프 (pure_thermal) ===
-		fprintf(stderr, "[V4L2] colormap=%s size=%d min=%u max=%u scale=%.3f\n",
+		fprintf(stderr, "[IR-DIAG] colormap=%s size=%d palette min=%u (%.1f°C) max=%u (%.1f°C) scale=%.3f\n",
 		        (typeColormap == 4) ? "custom" : (typeColormap == 3) ? "ironblack" : "other",
-		        colormapSize, minValue, maxValue, scale);
+		        colormapSize, minValue, ir_ck_to_c(minValue), maxValue, ir_ck_to_c(maxValue), scale);
+		fprintf(stderr, "[IR-DIAG] TLinear 기대값: 실온이면 raw≈29000~31000 cK. "
+		        "raw max<16384 이면 14bit count(TLinear 아님) → in_range=0 → video12 BLACK.\n");
 		const size_t frame_bytes = static_cast<size_t>(myImageWidth) * static_cast<size_t>(myImageHeight) * 2;
 		std::vector<uint8_t> y16_buf(frame_bytes);
 		int frame_count = 0;
+		int short_frame_drops = 0;
 		while (!shouldStop) {
 			const bool capture_this_frame = capture_requested_.load(std::memory_order_relaxed);
 			if (capture_this_frame) {
@@ -397,6 +568,12 @@ void LeptonThread::run()
 			}
 			size_t bytesused = static_cast<size_t>(buf.bytesused);
 			if (bytesused < frame_bytes || buf.index >= static_cast<unsigned>(v4l2src_nbuf_)) {
+				short_frame_drops++;
+				if (short_frame_drops <= 5 || (short_frame_drops % 45) == 0) {
+					fprintf(stderr, "[IR-DIAG] drop undersized src frame bytesused=%zu need=%zu index=%u drops=%d "
+					        "(video12 keeps last/init BLACK)\n",
+					        bytesused, frame_bytes, buf.index, short_frame_drops);
+				}
 				(void)ioctl(v4l2src_fd_, VIDIOC_QBUF, &buf);
 				continue;
 			}
@@ -404,7 +581,9 @@ void LeptonThread::run()
 			if (ioctl(v4l2src_fd_, VIDIOC_QBUF, &buf) < 0) {
 				fprintf(stderr, "[V4L2] QBUF failed: %s\n", strerror(errno));
 			}
-			if (frame_count == 0) fprintf(stderr, "[V4L2] first frame ok, %zu bytes\n", frame_bytes);
+			if (frame_count == 0) {
+				fprintf(stderr, "[IR-DIAG] first src frame ok, bytesused=%zu (need %zu)\n", bytesused, frame_bytes);
+			}
 
 			// 디버깅: raw 프레임 min/max (centiKelvin → Celsius)
 			uint16_t raw_min = 65535, raw_max = 0;
@@ -432,18 +611,24 @@ void LeptonThread::run()
 			has_prev_pixel = false;
 			frameValid = false;
 			int pixelsProcessed = 0;
+			int n_zero = 0, n_below = 0, n_above = 0;
+			uint64_t raw_sum = 0;
 			for (int row = 0; row < myImageHeight; row++) {
 				for (int col = 0; col < myImageWidth; col++) {
 					size_t idx = static_cast<size_t>(row) * static_cast<size_t>(myImageWidth) + static_cast<size_t>(col);
 					uint16_t valueFrameBuffer = y16_buf[idx*2] | (static_cast<uint16_t>(y16_buf[idx*2+1]) << 8);
+					raw_sum += valueFrameBuffer;
 					uint8_t r, g, b;
 					if (valueFrameBuffer == 0) {
+						n_zero++;
 						// 센서가 0을 반환하는 경우는 "invalid" 의미로 사용되므로 그대로 검정으로 출력한다.
 						r = g = b = 0;
 					} else if (valueFrameBuffer <= minValue) {
+						n_below++;
 						// min 이하(예: 0°C 및 그 이하)는 항상 화이트로 표현
 						r = g = b = 255;
 					} else if (valueFrameBuffer >= maxValue) {
+						n_above++;
 						// max 이상(예: 50°C 및 그 초과)은 항상 블랙으로 표현
 						r = g = b = 0;
 					} else {
@@ -487,11 +672,35 @@ void LeptonThread::run()
 			}
 			int expectedPixels = myImageWidth * myImageHeight;
 			bool frameIncomplete = (pixelsProcessed < expectedPixels * 9 / 10);
-			if (++frame_count <= 3 || (frame_count % 90) == 0) {
-				float min_c = (raw_min <= 65534) ? (raw_min / 100.f - 273.15f) : 0.f;
-				float max_c = (raw_max > 0) ? (raw_max / 100.f - 273.15f) : 0.f;
-				fprintf(stderr, "[V4L2] frame %d raw min=%u (%.1f°C) max=%u (%.1f°C) px=%d/%d\n",
-				        frame_count, raw_min, min_c, raw_max, max_c, pixelsProcessed, expectedPixels);
+			const bool had_prev = (prev_vidsendbuf != nullptr);
+			uint64_t y_sum = 0;
+			if (vidsendbuf) {
+				const int n_y = expectedPixels;
+				for (int i = 0; i < n_y; i++) y_sum += vidsendbuf[static_cast<size_t>(i) * 2];
+			}
+			++frame_count;
+			const char* likely = classify_ir_black_reason(
+			    n_zero, n_below, pixelsProcessed, n_above, expectedPixels,
+			    raw_max, frameIncomplete, had_prev);
+			const bool diag = (frame_count <= 8) || (frame_count % 45 == 0)
+			                  || (strcmp(likely, "ok") != 0 && (frame_count % 15 == 0));
+			if (diag) {
+				const double mean_ck = expectedPixels > 0
+				    ? static_cast<double>(raw_sum) / static_cast<double>(expectedPixels) : 0.0;
+				const double luma = expectedPixels > 0
+				    ? static_cast<double>(y_sum) / static_cast<double>(expectedPixels) : 0.0;
+				fprintf(stderr,
+				        "[IR-DIAG] frame=%d raw min=%u (%.1f°C) max=%u (%.1f°C) mean=%.0f (%.1f°C)\n",
+				        frame_count, raw_min, ir_ck_to_c(raw_min), raw_max, ir_ck_to_c(raw_max),
+				        mean_ck, (mean_ck / 100.0) - 273.15);
+				fprintf(stderr,
+				        "[IR-DIAG] bins zero=%d below_min=%d in_range=%d above_max=%d / %d | "
+				        "palette %.1f..%.1f°C (%u..%u cK) yuyv_luma_mean=%.1f\n",
+				        n_zero, n_below, pixelsProcessed, n_above, expectedPixels,
+				        ir_ck_to_c(minValue), ir_ck_to_c(maxValue), minValue, maxValue, luma);
+				fprintf(stderr, "[IR-DIAG] likely=%s incomplete=%d sink_fill=%s\n",
+				        likely, frameIncomplete ? 1 : 0,
+				        frameIncomplete ? (had_prev ? "reuse_prev" : "BLACK") : "painted");
 			}
 			if (frameIncomplete) {
 				if (prev_vidsendbuf) memcpy(vidsendbuf, prev_vidsendbuf, myImageWidth * myImageHeight * 2);
@@ -1240,7 +1449,14 @@ void LeptonThread::applyCaptureStreamFxYuyv(uint8_t* dst_yuyv, const uint8_t* sr
 
 void LeptonThread::updateVpipe()
 {
-	if (v4l2sink < 0 || vidsendbuf == nullptr || v4l2_bufs_[0] == nullptr) return;
+	if (v4l2sink < 0 || vidsendbuf == nullptr || v4l2_bufs_[0] == nullptr) {
+		static int n_skip_unready = 0;
+		if (++n_skip_unready <= 3 || (n_skip_unready % 90) == 0) {
+			fprintf(stderr, "[IR-DIAG] updateVpipe skipped sink_unready (fd=%d buf=%p) n=%d — /dev/video12 stays init BLACK\n",
+			        v4l2sink, static_cast<void*>(v4l2_bufs_[0]), n_skip_unready);
+		}
+		return;
+	}
 	const int yuyvSize = myImageWidth * myImageHeight * 2;
 	int idx;
 	if (v4l2_queued_ < V4L2_NBUF) {
@@ -1250,7 +1466,15 @@ void LeptonThread::updateVpipe()
 		memset(&buf, 0, sizeof(buf));
 		buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
 		buf.memory = V4L2_MEMORY_MMAP;
-		if (ioctl(v4l2sink, VIDIOC_DQBUF, &buf) < 0) return;
+		if (ioctl(v4l2sink, VIDIOC_DQBUF, &buf) < 0) {
+			static int n_dq_fail = 0;
+			if (++n_dq_fail <= 5 || (n_dq_fail % 90) == 0) {
+				fprintf(stderr, "[IR-DIAG] sink DQBUF failed errno=%d (%s) queued=%d n=%d — "
+				        "loopback consumer가 안 읽으면 초기 BLACK 버퍼가 유지됨\n",
+				        errno, strerror(errno), v4l2_queued_, n_dq_fail);
+			}
+			return;
+		}
 		idx = buf.index;
 		v4l2_queued_--;
 	}
@@ -1313,6 +1537,14 @@ void LeptonThread::open_vpipe() {
         fprintf(stderr, "Failed to set format on v4l2sink. (%s)\n", strerror(errno));
         exit(-1);
     }
+    {
+        struct v4l2_format got;
+        memset(&got, 0, sizeof(got));
+        got.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+        if (ioctl(v4l2sink, VIDIOC_G_FMT, &got) == 0) {
+            ir_log_fourcc("[IR-DIAG] sink G_FMT /dev/video12", got);
+        }
+    }
 
     // pure_thermal 9 fps
     struct v4l2_streamparm parm;
@@ -1367,6 +1599,8 @@ void LeptonThread::open_vpipe() {
         fprintf(stderr, "VIDIOC_STREAMON failed: %s\n", strerror(errno));
         exit(-1);
     }
+    fprintf(stderr, "[IR-DIAG] sink /dev/video12 STREAMON queued=%d YUYV BLACK dummy frames "
+            "(ffplay가 이 상태만 보면 검정). 이후 유효 프레임이 와야 색이 바뀜.\n", v4l2_queued_);
 }
 
 

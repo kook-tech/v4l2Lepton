@@ -58,6 +58,29 @@ pure_thermal 보드를 `/dev/video0` 등 V4L2 장치로 사용할 때, `-v4l2` �
 
 `run.sh`에서 `V4L2_DEVICE="/dev/video0"`으로 설정해도 됩니다.
 
+### ffplay(`/dev/video12`) 검은 화면 — `[IR-DIAG]`
+
+`ir-stream.service`는 Y16을 팔레트 매핑한 뒤 v4l2loopback(`/dev/video12`)에 YUYV로 씁니다.  
+새 보드/렌즈에서 ffplay가 검으면 **raw가 TLinear(cK)가 아니거나**, in-range 픽셀이 90% 미만이라 **버퍼를 BLACK으로 덮어쓴** 경우가 많습니다.
+
+```bash
+journalctl -u ir-stream -f | grep IR-DIAG
+```
+
+| `likely=` | 의미 |
+|---|---|
+| `ok` | 팔레트 범위 안. video12에 색이 나가야 함 |
+| `y16_not_tlinear_raw14` | Y16 max&lt;16384. 14bit count이지 cK가 아님 → in_range=0 → **BLACK** |
+| `source_all_zero` | 소스 픽셀이 거의 0 |
+| `all_below_scale_min` / `all_above_scale_max` | `-min/-max` (기본 0~50°C) 밖 |
+| `incomplete_no_prev_black_fill` | in_range&lt;90% 이고 이전 프레임 없음 → video12 **BLACK** |
+| `src_not_y16` | 캡처 장치가 Y16이 아님. sink는 초기 더미 검정만 유지 |
+
+실온 TLinear면 `raw mean` 이 대략 29000~31000 cK (약 17~37°C) 여야 합니다.
+
+`-v4l2` 기동 시 호스트가 UVC XU로 **AGC off / RAD on / TLinear 0.01K** 를 매번 넣습니다 (Lepton RAM이라 전원 사이클마다 필요).  
+건너뛰려면 `IR_SKIP_TLINEAR=1`. 로그: `[IR-DIAG] XU tlinear_enable`.
+
 라즈베리파이 4에서 CPU governor를 올리고 싶으면:
 
 ```bash
