@@ -6124,23 +6124,46 @@ void customizePalette2(int sigMin, int sigMax, int rangeMin, int rangeMax) {
     	float ratio = (float)i / (numColors - 1);
     	int targetTemp = base_min + ratio * (base_max - base_min);
 
-    	// targetTemp → colorIdx 계산
-    	int colorIdx;
-    	if (targetTemp < sigMin) {
-        	float subNorm = (float)(targetTemp - base_min) / (sigMin - base_min);
-        	colorIdx = (int)(subNorm * (numColors * 0.2));
-   	    } else if (targetTemp <= sigMax) {
-       	 	float subNorm = (float)(targetTemp - sigMin) / (sigMax - sigMin);
-        	colorIdx = (int)(numColors * 0.2 + subNorm * (numColors * 0.6));
-   	    } else {
-        	float subNorm = (float)(targetTemp - sigMax) / (base_max - sigMax);
-       		colorIdx = (int)(numColors * 0.8 + subNorm * (numColors * 0.2));
+    	// sigMax 초과 ~ rangeMax: 노랑 → 빨강 → 마젠타.
+    	// 그 아래는 기존 팔레트(저온 파랑 / 정상 회색)를 그대로 샘플링한다.
+    	int r, g, b;
+    	if (targetTemp > sigMax) {
+    		const float span = static_cast<float>(base_max - sigMax);
+    		float subNorm = (span > 0.f) ? static_cast<float>(targetTemp - sigMax) / span : 1.f;
+    		if (subNorm < 0.f) subNorm = 0.f;
+    		if (subNorm > 1.f) subNorm = 1.f;
+    		if (subNorm <= 0.5f) {
+    			const float u = subNorm / 0.5f;  // 0 노랑, 1 빨강
+    			r = 255;
+    			g = static_cast<int>(255.0f * (1.0f - u) + 0.5f);
+    			b = 0;
+    		} else {
+    			const float u = (subNorm - 0.5f) / 0.5f;  // 0 빨강, 1 마젠타
+    			r = 255;
+    			g = 0;
+    			b = static_cast<int>(255.0f * u + 0.5f);
+    		}
+    		if (g < 0) g = 0;
+    		if (g > 255) g = 255;
+    		if (b < 0) b = 0;
+    		if (b > 255) b = 255;
+    	} else {
+    		int colorIdx;
+    		if (targetTemp < sigMin) {
+    			float subNorm = (float)(targetTemp - base_min) / (sigMin - base_min);
+    			colorIdx = (int)(subNorm * (numColors * 0.2));
+    		} else {
+    			float subNorm = (float)(targetTemp - sigMin) / (sigMax - sigMin);
+    			colorIdx = (int)(numColors * 0.2 + subNorm * (numColors * 0.6));
+    		}
+    		if (colorIdx < 0) colorIdx = 0;
+    		if (colorIdx >= numColors) colorIdx = numColors - 1;
+    		r = base[colorIdx * 3 + 0];
+    		g = base[colorIdx * 3 + 1];
+    		b = base[colorIdx * 3 + 2];
     	}
 
-    	// 색상 복사 + LSB 인코딩 (인덱스당 유일한 RGB, JPG 역복원 정확도 향상)
-    	int r = base[colorIdx * 3 + 0];
-    	int g = base[colorIdx * 3 + 1];
-    	int b = base[colorIdx * 3 + 2];
+    	// LSB 인코딩 (인덱스당 유일한 RGB, JPG 역복원 정확도 향상)
     	r = (r & 0xFE) | ((i >> 0) & 1);
     	g = (g & 0xFE) | ((i >> 1) & 1);
     	b = (b & 0xFE) | ((i >> 2) & 1);
@@ -6154,29 +6177,21 @@ void customizePalette2(int sigMin, int sigMax, int rangeMin, int rangeMax) {
         colormap_custom[i] = custom_colormap[i];
     }
 
-    // 정상 범위의 최댓값(예: max°C)에 대응하는 마지막 엔트리는 항상 거의 검은색(1,1,1)으로 고정한다.
-    if (numColors > 0) {
-        const int last = numColors - 1;
-        colormap_custom[last * 3 + 0] = 1;
-        colormap_custom[last * 3 + 1] = 1;
-        colormap_custom[last * 3 + 2] = 1;
-    }
-    
-    
     //csv저장 및 출력
-    printf("\n온도 : %.1f°C ~ %.1f°C 를 팔레트에 매핑\n\t<< normal >> \n%.1f°C ~ %.1f°C -> grayscale 적용 \n\t<< abnormal >> \n온도 > %.1f°C  : yellow ~ red 적용 \n온도 <  %.1f°C  : Deep blue ~ blue 적용\n",
+    printf("\n온도 : %.1f°C ~ %.1f°C 를 팔레트에 매핑\n\t<< normal >> \n%.1f°C ~ %.1f°C -> grayscale 적용 \n\t<< abnormal >> \n온도 > %.1f°C  : yellow ~ red ~ magenta 적용 \n온도 >= %.1f°C : magenta 적용 \n온도 <  %.1f°C  : Deep blue ~ blue 적용\n",
        (rangeMin - 27315) / 100.0,
        (rangeMax - 27315) / 100.0,
        (sigMin - 27315) / 100.0,
        (sigMax - 27315) / 100.0,
        (sigMax - 27315) / 100.0,
+       (rangeMax - 27315) / 100.0,
        (sigMin - 27315) / 100.0
        );
     
     // customizePalette2에서는 실행 시 생성되는 colormap.csv를 다음과 같이 3002행으로 쓴다.
     //  - 0번째 행     : min 이하 (under-range) → 255,255,255
     //  - 1..numColors : 정상 범위 3000 step  → colormap_custom[0..numColors-1]
-    //  - 마지막 행    : max 초과 (over-range) → 0,0,0
+    //  - 마지막 행    : max 초과 (over-range) → 255,0,255
     {
         int numColors = get_size_colormap_custom() / 3;
         if (numColors > 3000) numColors = 3000;
@@ -6196,8 +6211,8 @@ void customizePalette2(int sigMin, int sigMax, int rangeMin, int rangeMax) {
                      << colormap_custom[base + 2] << "\n";
             }
 
-            // 마지막 인덱스: max 초과 (over-range)용 블랙
-            file << 0 << "," << 0 << "," << 0 << "\n";
+            // 마지막 인덱스: max 초과 (over-range)용 마젠타
+            file << 255 << "," << 0 << "," << 255 << "\n";
 
             file.close();
             std::cout << "컬러맵을 colormap.csv로 저장 완료 (3002 entries: under + 3000 normal + over)\n";

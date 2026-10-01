@@ -170,8 +170,12 @@ static bool save_png_from_raw(
 			// min 이하 → white
 			r = g = b = 255;
 		} else if (v >= scale_max_ck) {
-			// max 이상 → black
-			r = g = b = 0;
+			// max 이상: 커스텀 팔레트는 마젠타, 그 외는 블랙
+			if (type_colormap == 4) {
+				r = 255; g = 0; b = 255;
+			} else {
+				r = g = b = 0;
+			}
 		} else {
 			float vf = (static_cast<float>(v) - static_cast<float>(scale_min_ck)) * scale;
 			if (vf < 0.0f) vf = 0.0f;

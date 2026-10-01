@@ -629,8 +629,12 @@ void LeptonThread::run()
 						r = g = b = 255;
 					} else if (valueFrameBuffer >= maxValue) {
 						n_above++;
-						// max 이상(예: 50°C 및 그 초과)은 항상 블랙으로 표현
-						r = g = b = 0;
+						// max 이상: 커스텀 팔레트는 마젠타, 그 외는 블랙
+						if (typeColormap == 4) {
+							r = 255; g = 0; b = 255;
+						} else {
+							r = g = b = 0;
+						}
 					} else {
 						// 정상 범위(min < value < max)는 3000 step under-mapping으로 팔레트에 매핑
 						pixelsProcessed++;
@@ -935,16 +939,21 @@ void LeptonThread::run()
 				//##############################
 				//온도 데이터인 valueFrameBuffer를 가지고 컬러팔레트에 매핑을 하는 부분입니다.
 				// scale을 곱해서 min ~ max 범위에 대한 온도만 컬러맵에 매핑
-				value = (valueFrameBuffer-minValue)*scale;
-				
-				// 컬러맵 인덱스 범위 체크 최적화 (std::min 사용)
-				int base_ofs = 3 * value;
-				int ofs_r = (base_ofs + 0 < colormapSize) ? base_ofs + 0 : colormapSize - 1;
-				int ofs_g = (base_ofs + 1 < colormapSize) ? base_ofs + 1 : colormapSize - 1;
-				int ofs_b = (base_ofs + 2 < colormapSize) ? base_ofs + 2 : colormapSize - 1;
-				r = colormap[ofs_r];
-				g = colormap[ofs_g];
-				b = colormap[ofs_b];
+				if (typeColormap == 4 && valueFrameBuffer >= maxValue) {
+					// max 이상(임계온도 및 그 초과)은 마젠타. 검정은 invalid/결측 전용.
+					r = 255; g = 0; b = 255;
+				} else {
+					value = (valueFrameBuffer-minValue)*scale;
+
+					// 컬러맵 인덱스 범위 체크 최적화 (std::min 사용)
+					int base_ofs = 3 * value;
+					int ofs_r = (base_ofs + 0 < colormapSize) ? base_ofs + 0 : colormapSize - 1;
+					int ofs_g = (base_ofs + 1 < colormapSize) ? base_ofs + 1 : colormapSize - 1;
+					int ofs_b = (base_ofs + 2 < colormapSize) ? base_ofs + 2 : colormapSize - 1;
+					r = colormap[ofs_r];
+					g = colormap[ofs_g];
+					b = colormap[ofs_b];
+				}
 				
 				if (capture_this_frame) {
 					if (typeLepton == 3) {
