@@ -372,10 +372,24 @@ void LeptonThread::useRangeMaxValue(uint16_t newMaxValue)
 	rangeMax = newMaxValue;
 }
 
+void LeptonThread::applyStreamProfile(int colormapType, bool frameStretch, int rangeMinCk, int rangeMaxCk, int sigMinCk, int sigMaxCk)
+{
+	if (!frameStretch && sigMinCk >= 0 && sigMaxCk >= 0 && rangeMinCk >= 0 && rangeMaxCk >= 0) {
+		customizePalette2(sigMinCk, sigMaxCk, rangeMinCk, rangeMaxCk);
+	}
+	useColormap(colormapType);
+	if (frameStretch) {
+		setAutomaticScalingRange();
+		return;
+	}
+	if (rangeMinCk >= 0) useRangeMinValue(static_cast<uint16_t>(rangeMinCk));
+	if (rangeMaxCk >= 0) useRangeMaxValue(static_cast<uint16_t>(rangeMaxCk));
+}
+
 void LeptonThread::run()
 {
 	const int *colormap = selectedColormap;
-	const int colormapSize = selectedColormapSize;
+	int colormapSize = selectedColormapSize;
 	uint16_t minValue = rangeMin;
 	uint16_t maxValue = rangeMax;
 	float diff = maxValue - minValue;
@@ -544,6 +558,13 @@ void LeptonThread::run()
 		int frame_count = 0;
 		int short_frame_drops = 0;
 		while (!shouldStop) {
+			colormap = selectedColormap;
+			colormapSize = selectedColormapSize;
+			const bool frameStretch = typeColormap != 4;
+			if (!frameStretch) {
+				minValue = rangeMin;
+				maxValue = rangeMax;
+			}
 			const bool capture_this_frame = capture_requested_.load(std::memory_order_relaxed);
 			if (capture_this_frame) {
 				const size_t expected_raw_size = static_cast<size_t>(myImageWidth) * static_cast<size_t>(myImageHeight);
@@ -593,15 +614,16 @@ void LeptonThread::run()
 				if (v > raw_max) raw_max = v;
 			}
 
-			// auto-range
-			if (autoRangeMin || autoRangeMax) {
-				minValue = autoRangeMin ? 65535u : minValue;
-				maxValue = autoRangeMax ? 0u : maxValue;
-				for (size_t i = 0; i < work_raw_u16.size(); i++) {
-					uint16_t v = y16_buf[i*2] | (static_cast<uint16_t>(y16_buf[i*2+1]) << 8);
+			// Non-custom palettes stretch across this frame. Custom keeps the absolute range.
+			if (frameStretch || autoRangeMin || autoRangeMax) {
+				minValue = (frameStretch || autoRangeMin) ? 65535u : minValue;
+				maxValue = (frameStretch || autoRangeMax) ? 0u : maxValue;
+				const size_t nPix = static_cast<size_t>(myImageWidth) * static_cast<size_t>(myImageHeight);
+				for (size_t i = 0; i < nPix && (i * 2 + 1) < y16_buf.size(); i++) {
+					uint16_t v = y16_buf[i * 2] | (static_cast<uint16_t>(y16_buf[i * 2 + 1]) << 8);
 					if (v == 0) continue;
-					if (autoRangeMax && v > maxValue) maxValue = v;
-					if (autoRangeMin && v < minValue) minValue = v;
+					if ((frameStretch || autoRangeMax) && v > maxValue) maxValue = v;
+					if ((frameStretch || autoRangeMin) && v < minValue) minValue = v;
 				}
 				diff = maxValue - minValue;
 				scale = (diff > 0.0f) ? (3000.0f / diff) : 1.0f;
@@ -621,8 +643,22 @@ void LeptonThread::run()
 					uint8_t r, g, b;
 					if (valueFrameBuffer == 0) {
 						n_zero++;
-						// 센서가 0을 반환하는 경우는 "invalid" 의미로 사용되므로 그대로 검정으로 출력한다.
 						r = g = b = 0;
+					} else if (frameStretch) {
+						const int nColors = colormapSize / 3;
+						int colorIndex = 0;
+						if (nColors > 1 && maxValue > minValue) {
+							const float t = (static_cast<float>(valueFrameBuffer) - static_cast<float>(minValue))
+								/ static_cast<float>(maxValue - minValue);
+							colorIndex = static_cast<int>(t * static_cast<float>(nColors - 1));
+							if (colorIndex < 0) colorIndex = 0;
+							if (colorIndex > nColors - 1) colorIndex = nColors - 1;
+						}
+						const int base_ofs = 3 * colorIndex;
+						r = static_cast<uint8_t>(colormap[base_ofs]);
+						g = static_cast<uint8_t>(colormap[base_ofs + 1]);
+						b = static_cast<uint8_t>(colormap[base_ofs + 2]);
+						pixelsProcessed++;
 					} else if (valueFrameBuffer <= minValue) {
 						n_below++;
 						// min 이하(예: 0°C 및 그 이하)는 항상 화이트로 표현
@@ -866,12 +902,14 @@ void LeptonThread::run()
 			iSegmentStop = 1;
 		}
 
-		if ((autoRangeMin == true) || (autoRangeMax == true)) {
-			if (autoRangeMin == true) {
-				// Initialize minValue high so we can find the true frame minimum.
+		const bool frameStretch = typeColormap != 4;
+		colormap = selectedColormap;
+		colormapSize = selectedColormapSize;
+		if (frameStretch || autoRangeMin || autoRangeMax) {
+			if (frameStretch || autoRangeMin) {
 				minValue = 65535;
 			}
-			if (autoRangeMax == true) {
+			if (frameStretch || autoRangeMax) {
 				maxValue = 0;
 			}
 			for(int iSegment = iSegmentStart; iSegment <= iSegmentStop; iSegment++) {
@@ -887,10 +925,10 @@ void LeptonThread::run()
 						// Why this value is 0?
 						continue;
 					}
-					if ((autoRangeMax == true) && (value > maxValue)) {
+					if ((frameStretch || autoRangeMax) && (value > maxValue)) {
 						maxValue = value;
 					}
-					if ((autoRangeMin == true) && (value < minValue)) {
+					if ((frameStretch || autoRangeMin) && (value < minValue)) {
 						minValue = value;
 					}
 				}
@@ -942,6 +980,20 @@ void LeptonThread::run()
 				if (typeColormap == 4 && valueFrameBuffer >= maxValue) {
 					// max 이상(임계온도 및 그 초과)은 마젠타. 검정은 invalid/결측 전용.
 					r = 255; g = 0; b = 255;
+				} else if (typeColormap != 4) {
+					const int nColors = colormapSize / 3;
+					int colorIndex = 0;
+					if (nColors > 1 && maxValue > minValue) {
+						const float t = (static_cast<float>(valueFrameBuffer) - static_cast<float>(minValue))
+							/ static_cast<float>(maxValue - minValue);
+						colorIndex = static_cast<int>(t * static_cast<float>(nColors - 1));
+						if (colorIndex < 0) colorIndex = 0;
+						if (colorIndex > nColors - 1) colorIndex = nColors - 1;
+					}
+					const int base_ofs = 3 * colorIndex;
+					r = colormap[base_ofs];
+					g = colormap[base_ofs + 1];
+					b = colormap[base_ofs + 2];
 				} else {
 					value = (valueFrameBuffer-minValue)*scale;
 

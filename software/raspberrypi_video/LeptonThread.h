@@ -33,6 +33,8 @@ public:
   void setAutomaticScalingRange();
   void useRangeMinValue(uint16_t);
   void useRangeMaxValue(uint16_t);
+  /** frameStretch maps the whole palette to this frame. Otherwise keep absolute range and, for custom, rebuild it. */
+  void applyStreamProfile(int colormapType, bool frameStretch, int rangeMinCk, int rangeMaxCk, int sigMinCk, int sigMaxCk);
   void run();
   void stop();  // 종료 요청
   void updateVpipe();

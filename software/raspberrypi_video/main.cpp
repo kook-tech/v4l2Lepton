@@ -1,4 +1,5 @@
 #include <iostream>
+#include <cmath>
 #include <cstring>
 #include <unistd.h>
 #include <signal.h>
@@ -111,6 +112,40 @@ static bool save_jpg_from_yuyv(const QString& jpg_path, const std::vector<uint8_
 	return true;
 }
 
+static int ir_colormap_type(const QString& raw)
+{
+	const QString v = raw.trimmed().toLower();
+	if (v == "1" || v == "rainbow") return 1;
+	if (v == "2" || v == "grayscale" || v == "gray" || v == "grey") return 2;
+	if (v == "4" || v == "custom") return 4;
+	return 3;
+}
+
+static int ir_celsius_param_to_ck(const QJsonObject& params, const char* key)
+{
+	if (!params.contains(QLatin1String(key))) return -1;
+	const QJsonValue value = params.value(QLatin1String(key));
+	bool ok = false;
+	double celsius = value.toString().trimmed().toDouble(&ok);
+	if (!ok) celsius = value.toDouble();
+	if (!std::isfinite(celsius)) return -1;
+	return static_cast<int>((celsius + 273.15) * 100.0 + 0.5);
+}
+
+static void apply_ir_profile(LeptonThread* thread, const QJsonObject& params)
+{
+	if (!thread || params.isEmpty()) return;
+	const int colormap = ir_colormap_type(params.value("colormap").toString());
+	const bool frameStretch = colormap != 4;
+	thread->applyStreamProfile(
+		colormap,
+		frameStretch,
+		ir_celsius_param_to_ck(params, "range_min_c"),
+		ir_celsius_param_to_ck(params, "range_max_c"),
+		ir_celsius_param_to_ck(params, "sig_min_c"),
+		ir_celsius_param_to_ck(params, "sig_max_c"));
+}
+
 // raw16(centiKelvin) + 팔레트 → RGB PNG (YUYV 경유 없음, 무손실)
 static bool save_png_from_raw(
     const QString& png_path,
@@ -153,6 +188,23 @@ static bool save_png_from_raw(
 		return false;
 	}
 
+	const bool frameStretch = type_colormap != 4;
+	uint16_t map_min = scale_min_ck;
+	uint16_t map_max = scale_max_ck;
+	if (frameStretch) {
+		map_min = 65535;
+		map_max = 0;
+		for (uint16_t sample : raw_u16) {
+			if (sample == 0) continue;
+			if (sample < map_min) map_min = sample;
+			if (sample > map_max) map_max = sample;
+		}
+		if (map_min == 65535) {
+			map_min = 0;
+			map_max = 1;
+		}
+	}
+
 	std::vector<uint8_t> rgb;
 	rgb.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 3);
 
@@ -164,8 +216,25 @@ static bool save_png_from_raw(
 		uint8_t r = 0, g = 0, b = 0;
 
 		if (v == 0) {
-			// invalid → black
 			r = g = b = 0;
+		} else if (frameStretch) {
+			const int nColors = cmap_size / 3;
+			int idx = 0;
+			if (nColors > 1 && map_max > map_min) {
+				const float t = (static_cast<float>(v) - static_cast<float>(map_min))
+					/ static_cast<float>(map_max - map_min);
+				idx = static_cast<int>(t * static_cast<float>(nColors - 1));
+				if (idx < 0) idx = 0;
+				if (idx > nColors - 1) idx = nColors - 1;
+			}
+			const int base = idx * 3;
+			if (base + 2 >= cmap_size) {
+				r = g = b = 0;
+			} else {
+				r = static_cast<uint8_t>(cmap[base]);
+				g = static_cast<uint8_t>(cmap[base + 1]);
+				b = static_cast<uint8_t>(cmap[base + 2]);
+			}
 		} else if (v <= scale_min_ck) {
 			// min 이하 → white
 			r = g = b = 255;
@@ -433,6 +502,8 @@ private:
 		job.raw_path = out.value("raw_path").toString();
 		job.meta_path = out.value("meta_path").toString();
 		job.jpg_quality = out.contains("jpg_quality") ? out.value("jpg_quality").toInt(90) : 90;
+		job.collectParams = o.value("collect").toObject();
+		job.restoreParams = o.value("restore").toObject();
 
 		printf("[thermal_mqtt] capture_now received: request_id=%s png_path=%s raw_path=%s\n",
 			job.request_id.toUtf8().constData(),
@@ -467,6 +538,8 @@ private:
 		QString raw_path;
 		QString meta_path;
 		int jpg_quality = 90;
+		QJsonObject collectParams;
+		QJsonObject restoreParams;
 	};
 
 	void worker_loop() {
@@ -480,6 +553,14 @@ private:
 			}
 			if (!job_opt.has_value()) continue;
 			const Job job = *job_opt;
+			struct RestoreStream {
+				LeptonThread* thread;
+				QJsonObject restore;
+				~RestoreStream() {
+					if (thread && !restore.isEmpty()) apply_ir_profile(thread, restore);
+				}
+			} restore_stream{lepton_, job.restoreParams};
+			if (!job.collectParams.isEmpty()) apply_ir_profile(lepton_, job.collectParams);
 
 			QJsonObject resp;
 			resp["type"] = "thermal_capture_result";
