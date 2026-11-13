@@ -3100,12 +3100,20 @@ double sigmoid(double x) {
 }
 
 void customizePalette2(int sigMin, int sigMax, int rangeMin, int rangeMax) {
-    const int* base = colormap_custom;
     // colormap_custom는 3000개의 RGB 엔트리를 기준으로 설계되어 있으므로,
     // get_size_colormap_custom() 결과가 더 크더라도 최대 3000개까지만 사용한다.
     int numColors = get_size_colormap_custom() / 3;
     if (numColors > 3000) numColors = 3000;
     if (numColors <= 0) numColors = 3000;  // 방어적 기본값
+    // 파랑·회색은 이 배열에서 베낀다. 결과를 colormap_custom에 덮어쓰므로,
+    // 같은 파라미터로 다시 만들 때는 처음의 원본을 읽어야 한다.
+    static int source[3000 * 3];
+    static int sourceColors = 0;
+    if (sourceColors == 0) {
+        sourceColors = numColors;
+        for (int i = 0; i < numColors * 3; ++i) source[i] = colormap_custom[i];
+    }
+    const int* base = source;
     int custom_colormap[numColors * 3];
 
     const int base_min = rangeMin == -1 ? 26315 : rangeMin;
